@@ -8,8 +8,9 @@ irc.freeq.at  ←TLS→  irc-bridge  ──POST /irc/inbound──►  eve :8000
 ```
 
 1. Live PRIVMSGs (after join backlog) go into a per-target ring buffer.
-2. A mention → bridge `POST`s `{from,target,text,context}` to eve.
-   `context` is recent scrollback for that channel/DM (oldest → newest).
+2. A mention → bridge immediately 👀-reacts the message (TAGMSG `+react`
+   / `+reply=<msgid>`) so the user sees work started, then `POST`s
+   `{from,target,text,context,msgid}` to eve. `context` is recent scrollback.
 3. Eve runs the agent turn; `context` is injected as user-role messages
    before the mention (`SendPayload.context`).
 4. On `message.completed`, eve pushes an SSE `privmsg` event.
@@ -38,3 +39,4 @@ node irc-bridge/server.mjs
 | `IRC_BACKLOG_*` | join history ignore |
 | `IRC_CONTEXT_LINES` | ring buffer size (default `40`) |
 | `IRC_CONTEXT_MAX_CHARS` | max formatted context chars (default `6000`) |
+| `IRC_WORKING_REACT` | emoji for “working on it” (default `👀`) |

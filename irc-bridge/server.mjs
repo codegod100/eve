@@ -225,15 +225,57 @@ function makeOauthDpop(session, method, htu, accessToken, nonce) {
 // IRC line parse
 // ---------------------------------------------------------------------------
 
+/** IRCv3 tag-value escape (message-tags §). */
+function escapeTagValue(s) {
+  return String(s)
+    .replace(/\\/g, "\\\\")
+    .replace(/;/g, "\\:")
+    .replace(/ /g, "\\s")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n");
+}
+
+function unescapeTagValue(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\" && i + 1 < s.length) {
+      const n = s[++i];
+      if (n === ":") out += ";";
+      else if (n === "s") out += " ";
+      else if (n === "\\") out += "\\";
+      else if (n === "r") out += "\r";
+      else if (n === "n") out += "\n";
+      else out += n;
+    } else out += c;
+  }
+  return out;
+}
+
+/** Parse `@k=v;k2=v2 ` tag prefix into a map. Keys keep their `+` if client-only. */
+function parseIrcTags(line) {
+  /** @type {Record<string, string>} */
+  const tags = {};
+  if (!line.startsWith("@")) return { tags, rest: line };
+  const sp = line.indexOf(" ");
+  if (sp === -1) return { tags, rest: "" };
+  const tagPart = line.slice(1, sp);
+  const rest = line.slice(sp + 1);
+  for (const item of tagPart.split(";")) {
+    if (!item) continue;
+    const eq = item.indexOf("=");
+    if (eq === -1) tags[item] = "";
+    else tags[item.slice(0, eq)] = unescapeTagValue(item.slice(eq + 1));
+  }
+  return { tags, rest };
+}
+
 function parseIrcLine(line) {
   // IRCv3 message-tags: @tag=val;tag=val :prefix CMD params :trailing
   // Must strip tags first or the first " :" is after tags and parsing breaks.
-  let rest = line;
-  if (rest.startsWith("@")) {
-    const sp = rest.indexOf(" ");
-    if (sp === -1) return { command: "", params: [], prefix: undefined };
-    rest = rest.slice(sp + 1);
-  }
+  const { tags, rest: afterTags } = parseIrcTags(line);
+  let rest = afterTags;
+  if (!rest) return { command: "", params: [], prefix: undefined, tags };
   let prefix;
   if (rest.startsWith(":")) {
     const sp = rest.indexOf(" ");
@@ -250,13 +292,19 @@ function parseIrcLine(line) {
   const command = parts.shift() ?? "";
   const params = parts;
   if (trailing !== undefined) params.push(trailing);
-  return { command, params, prefix };
+  return { command, params, prefix, tags };
 }
 
 function nickFromPrefix(prefix) {
   if (!prefix) return "";
   return prefix.split("!")[0];
 }
+
+/** Eyes reaction used as "working on it" ACK (same idea as GitHub 👀). */
+const WORKING_REACT =
+  process.env.IRC_WORKING_REACT && process.env.IRC_WORKING_REACT.length > 0
+    ? process.env.IRC_WORKING_REACT
+    : "👀";
 
 // ---------------------------------------------------------------------------
 // IRC client
@@ -324,6 +372,29 @@ class IrcClient {
     // Keep our own replies in the ring buffer so the next mention sees them.
     pushContext(target, this.nick, text);
     log(`→ PRIVMSG ${target}: ${String(text).slice(0, 80)}`);
+  }
+
+  /**
+   * freeq / IRCv3 reaction: TAGMSG with +react and +reply=<msgid>.
+   * No-op when msgid is missing (plain IRC).
+   */
+  sendReact(target, emoji, msgid) {
+    if (!target || !msgid || !emoji) return false;
+    const e = escapeTagValue(emoji);
+    const id = escapeTagValue(msgid);
+    // freeq-webui / freeq-sdk: @+react=<emoji>;+reply=<msgid> TAGMSG <target>
+    this.raw(`@+react=${e};+reply=${id} TAGMSG ${target}`);
+    log(`→ REACT ${emoji} on ${msgid.slice(0, 24)}… in ${target}`);
+    return true;
+  }
+
+  /** ACK that we accepted a mention and are working on it. */
+  reactWorking(target, msgid) {
+    if (!msgid) {
+      log(`no msgid for working react on ${target}`);
+      return false;
+    }
+    return this.sendReact(target, WORKING_REACT, msgid);
   }
 
   startWatchdog() {
@@ -560,6 +631,7 @@ class IrcClient {
         nickFromPrefix(m.prefix),
         m.params[0] ?? "",
         m.params[1] ?? "",
+        m.tags ?? {},
       );
     }
   }
@@ -573,7 +645,13 @@ class IrcClient {
       if (available.includes("sasl") && (this.freeqSession || this.password)) {
         wanted.push("sasl");
       }
-      for (const c of ["account-tag", "extended-join", "message-tags"]) {
+      // message-tags: receive msgid + send client-only tags (+react, +reply)
+      for (const c of [
+        "account-tag",
+        "extended-join",
+        "message-tags",
+        "message-ids",
+      ]) {
         if (available.includes(c)) wanted.push(c);
       }
       if (wanted.length) this.raw(`CAP REQ :${wanted.join(" ")}`);
@@ -666,8 +744,9 @@ class IrcClient {
     );
   }
 
-  handlePrivmsg(from, target, text) {
+  handlePrivmsg(from, target, text, tags = {}) {
     if (from === this.nick) return;
+    const msgid = tags.msgid || tags["draft/msgid"] || "";
     const isChannel = target.startsWith("#") || target.startsWith("&");
     if (isChannel) {
       if (this.shouldDropBacklog()) {
@@ -687,14 +766,16 @@ class IrcClient {
       if (!mention.test(text)) return;
       const body = text.replace(mention, "").trim();
       if (!body) return;
+      // Immediate 👀 so the user sees the bot accepted the mention.
+      this.reactWorking(target, msgid);
       const context = formatContext(target, {
         excludeFrom: from,
         excludeText: text,
       });
       log(
-        `mention from ${from} in ${target}: ${body.slice(0, 80)} (context ${context.length ? context[0].length : 0} chars)`,
+        `mention from ${from} in ${target}: ${body.slice(0, 80)} (context ${context.length ? context[0].length : 0} chars msgid=${msgid ? msgid.slice(0, 16) : "-"})`,
       );
-      this.onMessage(from, target, body, context);
+      this.onMessage(from, target, body, context, { msgid });
       return;
     }
     if (this.owners.size && !this.owners.has(from.toLowerCase())) {
@@ -704,11 +785,12 @@ class IrcClient {
     if (!text.trim()) return;
     // DMs: small private buffer so multi-line questions still have prior turns.
     pushContext(from, from, text);
+    this.reactWorking(from, msgid);
     const context = formatContext(from, {
       excludeFrom: from,
       excludeText: text,
     });
-    this.onMessage(from, from, text.trim(), context);
+    this.onMessage(from, from, text.trim(), context, { msgid });
   }
 }
 
@@ -716,12 +798,13 @@ class IrcClient {
 // Eve HTTP: inbound POST + outbound SSE
 // ---------------------------------------------------------------------------
 
-async function postInbound(from, target, text, context) {
+async function postInbound(from, target, text, context, meta = {}) {
   const url = `${EVE_URL}${INBOUND_PATH}`;
   const payload = { from, target, text };
   if (Array.isArray(context) && context.length > 0) {
     payload.context = context;
   }
+  if (meta.msgid) payload.msgid = meta.msgid;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -852,8 +935,8 @@ const irc = new IrcClient({
   tls: IRC_TLS,
   owners: IRC_OWNERS,
   freeqSession,
-  onMessage: (from, target, text, context) => {
-    void postInbound(from, target, text, context);
+  onMessage: (from, target, text, context, meta) => {
+    void postInbound(from, target, text, context, meta);
   },
 });
 
