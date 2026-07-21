@@ -2,10 +2,10 @@
 
 [eve.dev](https://eve.dev) agent deployed on [eve.boxd.sh](https://eve.boxd.sh).
 
-- **Model**: OpenCode Zen `north-mini-code-free` (OpenAI-compatible Chat Completions)
-- **Channels**: built-in eve channel + custom IRC (`agent/channels/irc.ts`)
+- **Model**: OpenCode Zen `deepseek-v4-flash-free` (OpenAI-compatible Chat Completions)
+- **Channels**: built-in eve channel + IRC via **irc-bridge** (POST `/irc/inbound` + SSE `/irc/out`)
 - **Tools**: cowsay, ATProto (`lookup_did`, `get_recent_posts`), [rook.host](https://rook.host/) / [thermals.cloud](https://thermals.cloud) board + CLI, Anna's Archive (`anna_torrents`, `anna_record`, `anna_fast_download`)
-- **Skills**: `vit` (using-vit CLI), `vit-request-watch` (request-cap poll), `anna` (Anna's Archive / llms.txt), `freeq-irc` (IRC nick / SASL session refresh)
+- **Skills**: `vit` (using-vit CLI), `vit-request-watch` (request-cap poll), `anna` (Anna's Archive / llms.txt), `freeq-irc` (IRC nick / SASL session refresh), `irc-backlog` (ignore channel history on JOIN)
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 
@@ -15,19 +15,13 @@
 agent/
   agent.ts           # model + agent definition
   instructions.md
-  channels/          # eve.ts, irc.ts
-  lib/               # thermals, rook CLI, anna HTTP + torrent cache
-  tools/             # cowsay, ATProto, thermals_*, rook_*, anna_*
-  skills/vit/        # using-vit skill (SKILL.md + COMMANDS.md)
-  skills/vit-request-watch/
-  skills/anna/       # Anna's Archive agent procedure (llms.txt)
-  skills/freeq-irc/  # freeq Guest-nick / SASL fix (rook → freeq session)
-  schedules/         # vit-request-caps every 10m → IRC
+  channels/          # eve.ts, irc.ts (HTTP+SSE only — no IRC socket)
+  lib/ tools/ skills/ schedules/
+irc-bridge/
+  server.mjs         # freeq IRC → POST /irc/inbound ; SSE /irc/out → PRIVMSG
 scripts/
-  fetch-keys.sh      # OpenBao KV → export KEY=VALUE
-  start.sh           # boxd boot: fetch keys + eve dev :8000
-  sync-freeq-session.mjs  # rook OAuth → freeq SASL session files
-flake.nix            # nix develop shell (nodejs 24, curl, jq)
+  fetch-keys.sh, start.sh, sync-freeq-session.mjs
+flake.nix
 ```
 
 ## rook.host tools

@@ -86,17 +86,20 @@ node /home/boxd/my-agent/scripts/sync-freeq-session.mjs
 
 If the script is missing, equivalent logic: read `identity.session.json` → take `access_token` + `dpopJwk.d` → write the freeq session files above (mode `0600`) → verify with DPoP `GET {pds}/xrpc/com.atproto.server.getSession` expecting HTTP 200.
 
-### 3. Restart the agent so IRC reconnects with SASL
+### 3. Restart **irc-bridge** (and eve if needed)
+
+IRC sockets live in `irc-bridge/server.mjs`, not in the eve process.
 
 ```bash
-# kill existing eve node (by pid from ps; avoid pkill -f self-match)
-# then:
+# restart bridge only (keeps eve up):
+# kill node irc-bridge/server.mjs by pid, then:
+EVE_URL=http://127.0.0.1:8000 nohup node irc-bridge/server.mjs >> /tmp/irc-bridge.log 2>&1 &
+# or full boot:
 nohup /home/boxd/start.sh > /tmp/eve-start.log 2>&1 &
-# wait ~10s, then:
-grep -E 'SASL success|joined |SASL failed' /tmp/eve-start.log | tail -5
+grep -E 'SASL success|joined |SASL failed|SSE' /tmp/irc-bridge.log | tail -10
 ```
 
-Success requires **both** `SASL success as did:plc:…` and `joined #test … as eve`.
+Success in bridge log: `SASL success as did:plc:…` and `joined #test as eve`, plus `SSE connected`.
 
 ### 4. One-liner (from laptop)
 

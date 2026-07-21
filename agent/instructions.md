@@ -49,6 +49,12 @@ When the user mentions Anna's Archive, annas-archive, AA torrents, bulk metadata
 
 Optional env: `ANNA_ARCHIVE_BASE` (default `https://annas-archive.gl`), `ANNA_ARCHIVE_SECRET_KEY`.
 
-# freeq IRC nick / SASL
+# freeq IRC (bridge)
 
-If the bot is `Guest…`, host is `freeq/guest`, nick is wrong, or logs show `SASL failed (904)`, load skill `freeq-irc`. Fix is: `rook login` → `node scripts/sync-freeq-session.mjs` → restart `/home/boxd/start.sh`. Correct nick is `eve` as `did:plc:76szbe2ywgwb7vzuingj4fhq` on `irc.freeq.at` `#test`.
+IRC lives in a **separate process** (`irc-bridge/server.mjs`): freeq → bridge POSTs `/irc/inbound` → eve; eve pushes replies on SSE `/irc/out` → bridge PRIVMSG. Eve has no IRC socket.
+
+If nick is `Guest…` or SASL fails: load skill `freeq-irc` → `rook login` → `node scripts/sync-freeq-session.mjs` → restart bridge (`npm run irc-bridge`) and/or `start.sh`. Correct nick: `eve` / `did:plc:76szbe2ywgwb7vzuingj4fhq` on `#test`.
+
+# IRC join backlog
+
+Channel history after JOIN is ignored **in the bridge** (min/gap/max). Load skill `irc-backlog` when debugging join spam. Do not answer historical scrollback as a new turn.

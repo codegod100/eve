@@ -14,8 +14,8 @@ const opencode = createOpenAI({
 });
 
 export default defineAgent({
-  // north-mini-code-free — free tier on OpenCode Zen (hy3-free retired).
-  model: opencode.chat("north-mini-code-free"),
+  // deepseek-v4-flash-free — free tier on OpenCode Zen.
+  model: opencode.chat(process.env.OPENCODE_MODEL ?? "deepseek-v4-flash-free"),
   // OpenCode's /v1/models omits context_length; set the window so compaction
   // does not fail for this custom provider id.
   modelContextWindowTokens: 32_768,
