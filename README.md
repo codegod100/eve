@@ -4,8 +4,8 @@
 
 - **Model**: OpenCode Zen `deepseek-v4-flash-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + IRC via **irc-bridge** (POST `/irc/inbound` + SSE `/irc/out`)
-- **Tools**: cowsay, ATProto, rook/thermals, Anna's Archive (`anna_search`, `anna_download`, `anna_record`, `anna_fast_download`, …)
-- **Skills**: `vit` (using-vit CLI), `vit-request-watch` (request-cap poll), `anna` (Anna's Archive / llms.txt), `freeq-irc` (IRC nick / SASL session refresh), `irc-backlog` (ignore channel history on JOIN)
+- **Tools**: cowsay, ATProto, rook/thermals, Anna's Archive (`anna_search`, `anna_download`, …), `guess_emotion`
+- **Skills**: `vit`, `vit-request-watch`, `anna`, `freeq-irc`, `irc-backlog`, **`embody-emotion`** (tone; no "I have no feelings" dodge)
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 
