@@ -21,9 +21,14 @@ description: >-
 Correct state after fix:
 
 ```text
-[irc] SASL success as did:plc:76szbe2ywgwb7vzuingj4fhq
-[irc] joined #test on irc.freeq.at as eve
+[irc-bridge] SASL success as did:plc:76szbe2ywgwb7vzuingj4fhq
+[irc-bridge] welcome 001 nick=eve preferred=eve sasl=ok
+[irc-bridge] joined #test as eve
 ```
+
+Bridge behavior (irc-bridge/server.mjs): always registers as `IRC_NICK` (`eve`),
+reclaims that nick after SASL if freeq force-renamed us, refuses to stay as
+`Guest*` when auth is required, and reloads the freeq session on every reconnect.
 
 ## Identity map
 
@@ -117,9 +122,10 @@ boxd exec eve -- bash -lc 'npx --yes @solpbc/rook login && node /home/boxd/my-ag
 
 ## Prevention
 
-- Access tokens expire ~hours. On boot, `start.sh` should run `rook login` + `sync-freeq-session.mjs` before `eve dev` (if not already wired, do it when fixing nick again).
-- After **hibernate → wake**, TCP to freeq is often half-dead: restart the agent even if tokens are still valid.
+- Access tokens expire ~hours. On boot, `start.sh` should run `rook login` + `sync-freeq-session.mjs` before `eve start` / irc-bridge (if not already wired, do it when fixing nick again).
+- After **hibernate → wake**, TCP to freeq is often half-dead: restart the bridge even if tokens are still valid.
 - Keep `openbao` reachable if keys come from OpenBao at start.
+- `IRC_REQUIRE_AUTH` defaults on for freeq hosts: bridge will not sit in `#test` as `Guest*`; it reconnects until SASL lands `eve`.
 
 ## Related
 

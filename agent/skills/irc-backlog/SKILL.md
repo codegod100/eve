@@ -41,10 +41,16 @@ Logs:
 
 Set on the eve VM before `start.sh` (or export in `start.sh`).
 
+## No scrollback in the model turn
+
+The bridge does **not** attach channel history as `SendPayload.context`.
+eve would inject that as `role:user` messages and models answer every line
+(old mentions, rejoin flood, etc.). Inbound is the mention body only.
+
 ## Agent behavior if a historical mention still arrives
 
 - Prefer **one short line**: you only handle live turns; ignore replaying prior conversation.
-- Do **not** re-run long tool workflows for a mention that is clearly a backlog replay (same text as earlier in the scrollback the user just reconnected past).
+- Do **not** re-run long tool workflows for a mention that is clearly a backlog replay.
 - Real new mentions after the quiet gap are live — answer normally (single IRC line).
 
 ## Related

@@ -10,6 +10,7 @@
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -47,77 +48,29 @@ const PING_AFTER_MS = envMs("IRC_PING_AFTER_MS", 60_000);
 const DEAD_AFTER_MS = envMs("IRC_DEAD_AFTER_MS", 120_000);
 const TCP_KEEPALIVE_MS = envMs("IRC_TCP_KEEPALIVE_MS", 30_000);
 
-/** How many recent PRIVMSGs (per target) to keep for channel context. */
-const CONTEXT_LINES = envInt("IRC_CONTEXT_LINES", 40);
-/** Cap formatted context size so prompts stay bounded. */
-const CONTEXT_MAX_CHARS = envInt("IRC_CONTEXT_MAX_CHARS", 6_000);
+/** Control HTTP for eve tools (play radio / ensure AV). */
+const CONTROL_HOST = process.env.IRC_CONTROL_HOST ?? "127.0.0.1";
+const CONTROL_PORT = Number(process.env.IRC_CONTROL_PORT ?? 8791);
+/** eve-av-bridge base URL (media plane). */
+const AV_BRIDGE_URL = (
+  process.env.AV_BRIDGE_URL ?? "http://127.0.0.1:8790"
+).replace(/\/$/, "");
+/** freeq REST (session discovery). Default from IRC host. */
+const FREEQ_API_BASE = (
+  process.env.FREEQ_API_BASE ?? `https://${IRC_HOST}`
+).replace(/\/$/, "");
+/** MoQ SFU URL (https for QUIC). freeq default :8080/av/moq */
+const SFU_URL_RESOLVED =
+  process.env.SFU_URL ??
+  (IRC_HOST.includes("freeq")
+    ? "https://irc.freeq.at:8080/av/moq"
+    : `https://${IRC_HOST}/av/moq`);
 
 function envMs(name, fallback) {
   const raw = process.env[name];
   if (!raw) return fallback;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function envInt(name, fallback) {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-}
-
-// ---------------------------------------------------------------------------
-// Per-target ring buffer (channel scrollback for eve context)
-// ---------------------------------------------------------------------------
-
-/** @type {Map<string, Array<{ from: string, text: string, at: number }>>} */
-const contextBuffers = new Map();
-
-function pushContext(target, from, text) {
-  if (!target || !from) return;
-  const key = target.toLowerCase();
-  let buf = contextBuffers.get(key);
-  if (!buf) {
-    buf = [];
-    contextBuffers.set(key, buf);
-  }
-  const line = String(text ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!line) return;
-  buf.push({ from, text: line.slice(0, 400), at: Date.now() });
-  while (buf.length > CONTEXT_LINES) buf.shift();
-}
-
-/**
- * Format recent lines for eve's `context` field (user-role messages before
- * the mention). Omits the triggering mention line when `excludeText` matches
- * the last entry (mention is the delivery message, not context).
- */
-function formatContext(target, { excludeFrom, excludeText } = {}) {
-  const buf = contextBuffers.get(String(target).toLowerCase()) ?? [];
-  if (!buf.length) return [];
-  let lines = buf;
-  if (excludeFrom && excludeText) {
-    const last = buf[buf.length - 1];
-    const body = String(excludeText).replace(/\s+/g, " ").trim();
-    if (
-      last &&
-      last.from === excludeFrom &&
-      (last.text === body ||
-        last.text.endsWith(body) ||
-        body.endsWith(last.text))
-    ) {
-      lines = buf.slice(0, -1);
-    }
-  }
-  if (!lines.length) return [];
-  const rendered = lines.map((e) => `<${e.from}> ${e.text}`);
-  let block = `Recent IRC in ${target} (oldest → newest, ${lines.length} lines):\n${rendered.join("\n")}`;
-  if (block.length > CONTEXT_MAX_CHARS) {
-    block = `…(truncated)\n` + block.slice(-(CONTEXT_MAX_CHARS - 14));
-  }
-  return [block];
 }
 
 function log(...args) {
@@ -310,6 +263,10 @@ const WORKING_REACT =
 // IRC client
 // ---------------------------------------------------------------------------
 
+function isGuestNick(nick) {
+  return /^guest\d*$/i.test(String(nick ?? "").trim());
+}
+
 class IrcClient {
   constructor(opts) {
     this.host = opts.host;
@@ -321,6 +278,10 @@ class IrcClient {
     this.tls = !!opts.tls;
     this.owners = opts.owners ?? new Set();
     this.freeqSession = opts.freeqSession ?? null;
+    /** When true (default on freeq hosts), refuse Guest* and reconnect for SASL. */
+    this.requireAuth =
+      opts.requireAuth ??
+      (String(this.host).includes("freeq") || !!this.freeqSession);
     this.onMessage = opts.onMessage;
     this.socket = null;
     this.tlsSock = null;
@@ -336,8 +297,95 @@ class IrcClient {
     this.lastRxAt = 0;
     this.lastPingAt = 0;
     this.authDid = null;
+    this.saslOk = false;
+    this.saslFailed = false;
+    this.nickInUseRetries = 0;
     this.reconnectTimer = undefined;
     this.watchdogTimer = undefined;
+    /** @type {Map<string, { sessionId: string, at: number }>} */
+    this.avByChannel = new Map();
+    /** Pending waiters for av-state started: channel → resolve(sessionId)[] */
+    this.avWaiters = new Map();
+  }
+
+  /** Reload freeq session from disk (rook login + sync may have refreshed it). */
+  refreshSession() {
+    const next = loadFreeqSession();
+    if (next) {
+      this.freeqSession = next;
+      this.password = undefined;
+      log(
+        `freeq session ready → ${next.pds_url} as ${next.handle ?? next.did}`,
+      );
+    } else if (this.requireAuth) {
+      log(
+        "no freeq session on disk — will not join as Guest; fix with rook login + sync-freeq-session",
+      );
+    }
+    return this.freeqSession;
+  }
+
+  nickMatchesPreferred(nick = this.nick) {
+    return (
+      String(nick ?? "").toLowerCase() ===
+      String(this.preferredNick ?? "").toLowerCase()
+    );
+  }
+
+  /**
+   * After SASL (or 001), reclaim IRC_NICK if freeq assigned Guest* / ghost nick.
+   * freeq: "Authenticate to reclaim" — send NICK preferred once authed.
+   */
+  reclaimPreferredNick(reason = "reclaim") {
+    if (!this.preferredNick) return false;
+    if (this.nickMatchesPreferred()) return false;
+    if (!this.saslOk && !this.authDid) {
+      log(
+        `skip NICK ${this.preferredNick} (${reason}): not SASL-authed yet (current=${this.nick})`,
+      );
+      return false;
+    }
+    log(
+      `${reason}: NICK ${this.preferredNick} (was ${this.nick}${this.authDid ? ` did=${this.authDid}` : ""})`,
+    );
+    this.raw(`NICK ${this.preferredNick}`);
+    return true;
+  }
+
+  noteAvState(channel, sessionId, action) {
+    const key = (channel || "").toLowerCase();
+    if (!key || !sessionId) return;
+    if (action === "started" || action === "joined") {
+      this.avByChannel.set(key, { sessionId, at: Date.now() });
+      const waiters = this.avWaiters.get(key) ?? [];
+      for (const r of waiters) r(sessionId);
+      this.avWaiters.delete(key);
+    } else if (action === "ended") {
+      this.avByChannel.delete(key);
+    }
+  }
+
+  waitAvStarted(channel, timeoutMs = 8_000) {
+    const key = channel.toLowerCase();
+    const known = this.avByChannel.get(key);
+    if (known?.sessionId) return Promise.resolve(known.sessionId);
+    return new Promise((resolve, reject) => {
+      const list = this.avWaiters.get(key) ?? [];
+      const timer = setTimeout(() => {
+        const cur = this.avWaiters.get(key) ?? [];
+        this.avWaiters.set(
+          key,
+          cur.filter((fn) => fn !== onOk),
+        );
+        reject(new Error(`timeout waiting for av-state on ${channel}`));
+      }, timeoutMs);
+      const onOk = (id) => {
+        clearTimeout(timer);
+        resolve(id);
+      };
+      list.push(onOk);
+      this.avWaiters.set(key, list);
+    });
   }
 
   start() {
@@ -369,8 +417,6 @@ class IrcClient {
       ];
       for (const c of chunks) this.raw(`PRIVMSG ${target} :${c}`);
     }
-    // Keep our own replies in the ring buffer so the next mention sees them.
-    pushContext(target, this.nick, text);
     log(`→ PRIVMSG ${target}: ${String(text).slice(0, 80)}`);
   }
 
@@ -395,6 +441,47 @@ class IrcClient {
       return false;
     }
     return this.sendReact(target, WORKING_REACT, msgid);
+  }
+
+  /**
+   * Send an IRCv3 TAGMSG with client tags (e.g. freeq AV signaling).
+   * @param {string} target
+   * @param {Record<string, string>} tags  keys may include leading +
+   */
+  sendTagmsg(target, tags) {
+    if (!target || !tags || !Object.keys(tags).length) return;
+    const parts = [];
+    for (const [k, v] of Object.entries(tags)) {
+      if (v === "" || v === undefined || v === null) parts.push(k);
+      else parts.push(`${k}=${escapeTagValue(String(v))}`);
+    }
+    this.raw(`@${parts.join(";")} TAGMSG ${target}`);
+    log(`→ TAGMSG ${target} ${parts.join(";")}`);
+  }
+
+  avStart(channel, instance, title) {
+    const tags = {
+      "+freeq.at/av-start": "",
+      "+freeq.at/av-instance": instance,
+    };
+    if (title) tags["+freeq.at/av-title"] = title;
+    this.sendTagmsg(channel, tags);
+  }
+
+  avJoin(channel, sessionId, instance) {
+    this.sendTagmsg(channel, {
+      "+freeq.at/av-join": "",
+      "+freeq.at/av-id": sessionId,
+      "+freeq.at/av-instance": instance,
+    });
+  }
+
+  avLeave(channel, sessionId, instance) {
+    this.sendTagmsg(channel, {
+      "+freeq.at/av-leave": "",
+      "+freeq.at/av-id": sessionId,
+      "+freeq.at/av-instance": instance,
+    });
   }
 
   startWatchdog() {
@@ -445,12 +532,20 @@ class IrcClient {
     }
   }
 
-  forceReconnect(reason) {
+  forceReconnect(reason, delayMs = 2_000) {
     if (this.stopped) return;
     this.connecting = false;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.detachSockets(reason);
-    this.scheduleReconnect(2_000);
+    this.scheduleReconnect(delayMs);
+  }
+
+  /** Alias used when we refuse Guest / SASL failure. */
+  scheduleForcedReconnect(reason, delayMs = 5_000) {
+    this.forceReconnect(reason, delayMs);
   }
 
   scheduleReconnect(delayMs = 5_000) {
@@ -471,9 +566,19 @@ class IrcClient {
     this.connecting = true;
     this.detachSockets("connect");
     const gen = this.generation;
+    // Always re-read session so a sync-freeq-session between reconnects is used.
+    this.refreshSession();
     this.nick = this.preferredNick;
+    this.authDid = null;
+    this.saslOk = false;
+    this.saslFailed = false;
+    this.nickInUseRetries = 0;
+    this.joined = false;
     log(
-      `connect gen=${gen} → ${this.host}:${this.port} tls=${this.tls} as ${this.nick}`,
+      `connect gen=${gen} → ${this.host}:${this.port} tls=${this.tls} as ${this.nick}` +
+        (this.freeqSession
+          ? ` (SASL ${this.freeqSession.did})`
+          : " (no freeq session)"),
     );
 
     let sock;
@@ -552,9 +657,27 @@ class IrcClient {
   }
 
   register() {
+    // Prefer the configured nick from the first line — freeq binds SASL to
+    // whatever NICK we hold; Guest rename only happens if SASL never succeeds.
+    if (this.requireAuth && !this.freeqSession) {
+      log(
+        "abort register: need freeq SASL session for nick " +
+          this.preferredNick +
+          " (rook login + sync-freeq-session)",
+      );
+      try {
+        this.raw("QUIT :waiting for freeq session");
+      } catch {
+        /* ignore */
+      }
+      this.scheduleForcedReconnect("no-session", 15_000);
+      return;
+    }
+    this.nick = this.preferredNick;
     this.raw("CAP LS 302");
-    this.raw(`NICK ${this.nick}`);
-    this.raw(`USER ${this.nick} 0 * :eve irc-bridge`);
+    this.raw(`NICK ${this.preferredNick}`);
+    this.raw(`USER ${this.preferredNick} 0 * :eve irc-bridge`);
+    log(`register CAP+NICK+USER as ${this.preferredNick}`);
   }
 
   raw(line) {
@@ -593,37 +716,130 @@ class IrcClient {
       this.handleAuthenticate(m);
       return;
     }
+    if (cmd === "900") {
+      // RPL_LOGGEDIN — params often [nick, hostmask, account, text]
+      const account = m.params[2];
+      if (account) this.authDid = account;
+      log(`logged in as ${account ?? m.params.join(" ")}`);
+      return;
+    }
     if (cmd === "903") {
+      this.saslOk = true;
+      this.saslFailed = false;
       log(`SASL success${this.authDid ? ` as ${this.authDid}` : ""}`);
       this.raw("CAP END");
+      // freeq may still be holding a temporary nick until registration ends;
+      // reclaim preferred as soon as we're authed (also again on 001).
+      this.reclaimPreferredNick("post-sasl");
       return;
     }
     if (cmd === "904" || cmd === "905") {
+      this.saslFailed = true;
+      this.saslOk = false;
       log(`SASL failed (${cmd}): ${m.params[m.params.length - 1] ?? ""}`);
       this.raw("CAP END");
+      if (this.requireAuth && this.freeqSession) {
+        log(
+          "SASL failed with freeq session present — disconnecting (will not stay as Guest)",
+        );
+        this.scheduleForcedReconnect("sasl-failed", 5_000);
+      }
       return;
     }
     if (cmd === "433") {
-      const suffix = Math.random().toString(36).slice(2, 6);
-      this.nick = `${this.preferredNick}-${suffix}`;
-      log(`nick in use; trying ${this.nick}`);
-      this.raw(`NICK ${this.nick}`);
+      // freeq: trailing `_` is a reclaimable fallback after DID auth.
+      // Random suffixes bind the wrong nick to the DID — avoid that.
+      this.nickInUseRetries += 1;
+      if (this.nickInUseRetries > 5) {
+        log(`nick ${this.preferredNick} still in use after retries; reconnect`);
+        this.scheduleForcedReconnect("nick-in-use", 8_000);
+        return;
+      }
+      if (!this.saslOk && this.freeqSession) {
+        const fallback = `${this.preferredNick}_`;
+        this.nick = fallback;
+        log(
+          `nick in use pre-SASL; temporary ${fallback} (freeq reclaim after auth)`,
+        );
+        this.raw(`NICK ${fallback}`);
+        return;
+      }
+      // Post-auth collision: re-try preferred a few times (ghost may die).
+      log(
+        `nick in use post-auth (try ${this.nickInUseRetries}); retry ${this.preferredNick}`,
+      );
+      setTimeout(() => {
+        if (!this.stopped) this.raw(`NICK ${this.preferredNick}`);
+      }, 1_500 * this.nickInUseRetries).unref?.();
       return;
     }
     if (cmd === "001") {
+      // Server-assigned nick is authoritative (Guest rename has no NICK msg).
+      const assigned = (m.params[0] ?? "").trim();
+      if (assigned) this.nick = assigned;
+      log(
+        `welcome 001 nick=${this.nick} preferred=${this.preferredNick} sasl=${this.saslOk ? "ok" : this.saslFailed ? "fail" : "none"}`,
+      );
+
+      if (isGuestNick(this.nick) && this.requireAuth) {
+        log(
+          `assigned Guest nick ${this.nick} — refusing channel join; reconnect after session refresh`,
+        );
+        this.scheduleForcedReconnect("guest-nick", 6_000);
+        return;
+      }
+
+      this.reclaimPreferredNick("post-welcome");
       this.raw(`JOIN ${this.channel}`);
       return;
     }
-    if (cmd === "JOIN" && nickFromPrefix(m.prefix) === this.nick) {
+    if (cmd === "NICK") {
+      const oldNick = nickFromPrefix(m.prefix);
+      const newNick = (m.params[0] ?? "").replace(/^:/, "");
+      if (
+        oldNick &&
+        newNick &&
+        oldNick.toLowerCase() === String(this.nick).toLowerCase()
+      ) {
+        log(`self nick ${oldNick} → ${newNick}`);
+        this.nick = newNick;
+        if (this.nickMatchesPreferred()) {
+          this.nickInUseRetries = 0;
+          log(`preferred nick ${this.preferredNick} held`);
+        }
+      }
+      return;
+    }
+    if (cmd === "NOTICE") {
+      const text = m.params[m.params.length - 1] ?? "";
+      // freeq: "Nick eve is registered — renamed to Guest12345. Authenticate…"
+      const guestRename = text.match(/renamed to (Guest\d+)/i);
+      if (guestRename) {
+        this.nick = guestRename[1];
+        log(`server force-renamed us to ${this.nick}: ${text.slice(0, 120)}`);
+      }
+      return;
+    }
+    if (
+      cmd === "JOIN" &&
+      nickFromPrefix(m.prefix).toLowerCase() === String(this.nick).toLowerCase()
+    ) {
       const now = Date.now();
       this.joined = true;
       this.joinedAt = now;
       this.backlogActive = true;
       this.lastChannelMsgAt = now;
       this.backlogDropped = 0;
-      log(
-        `joined ${this.channel} as ${this.nick} (backlog min=${BACKLOG_MIN_MS} gap=${BACKLOG_GAP_MS} max=${BACKLOG_MAX_MS})`,
-      );
+      if (!this.nickMatchesPreferred()) {
+        log(
+          `joined ${this.channel} as ${this.nick} (wanted ${this.preferredNick}) — reclaiming`,
+        );
+        this.reclaimPreferredNick("post-join");
+      } else {
+        log(
+          `joined ${this.channel} as ${this.nick} (backlog min=${BACKLOG_MIN_MS} gap=${BACKLOG_GAP_MS} max=${BACKLOG_MAX_MS})`,
+        );
+      }
       return;
     }
     if (cmd === "PRIVMSG") {
@@ -633,7 +849,19 @@ class IrcClient {
         m.params[1] ?? "",
         m.tags ?? {},
       );
+      return;
     }
+    if (cmd === "TAGMSG") {
+      this.handleTagmsg(m.params[0] ?? "", m.tags ?? {});
+    }
+  }
+
+  handleTagmsg(target, tags) {
+    const state = tags["+freeq.at/av-state"];
+    if (!state) return;
+    const sessionId = tags["+freeq.at/av-id"] ?? "";
+    log(`av-state ${state} ${target} id=${sessionId.slice(0, 16)}`);
+    this.noteAvState(target, sessionId, state);
   }
 
   handleCap(m) {
@@ -754,8 +982,6 @@ class IrcClient {
         this.backlogDropped += 1;
         return;
       }
-      // Record every live channel line (including the mention) for scrollback.
-      pushContext(target, from, text);
       const aliases = [
         ...new Set([this.nick, this.preferredNick, "eve", "eve-agent"]),
       ];
@@ -768,14 +994,12 @@ class IrcClient {
       if (!body) return;
       // Immediate 👀 so the user sees the bot accepted the mention.
       this.reactWorking(target, msgid);
-      const context = formatContext(target, {
-        excludeFrom: from,
-        excludeText: text,
-      });
+      // Mention only — never attach channel scrollback. eve's SendPayload.context
+      // becomes role:user history and models answer every historical line.
       log(
-        `mention from ${from} in ${target}: ${body.slice(0, 80)} (context ${context.length ? context[0].length : 0} chars msgid=${msgid ? msgid.slice(0, 16) : "-"})`,
+        `mention from ${from} in ${target}: ${body.slice(0, 80)} (msgid=${msgid ? msgid.slice(0, 16) : "-"})`,
       );
-      this.onMessage(from, target, body, context, { msgid });
+      this.onMessage(from, target, body, { msgid });
       return;
     }
     if (this.owners.size && !this.owners.has(from.toLowerCase())) {
@@ -783,14 +1007,8 @@ class IrcClient {
       return;
     }
     if (!text.trim()) return;
-    // DMs: small private buffer so multi-line questions still have prior turns.
-    pushContext(from, from, text);
     this.reactWorking(from, msgid);
-    const context = formatContext(from, {
-      excludeFrom: from,
-      excludeText: text,
-    });
-    this.onMessage(from, from, text.trim(), context, { msgid });
+    this.onMessage(from, from, text.trim(), { msgid });
   }
 }
 
@@ -798,12 +1016,9 @@ class IrcClient {
 // Eve HTTP: inbound POST + outbound SSE
 // ---------------------------------------------------------------------------
 
-async function postInbound(from, target, text, context, meta = {}) {
+async function postInbound(from, target, text, meta = {}) {
   const url = `${EVE_URL}${INBOUND_PATH}`;
   const payload = { from, target, text };
-  if (Array.isArray(context) && context.length > 0) {
-    payload.context = context;
-  }
   if (meta.msgid) payload.msgid = meta.msgid;
   try {
     const res = await fetch(url, {
@@ -920,8 +1135,21 @@ async function waitForEve(timeoutMs = 120_000) {
 // ---------------------------------------------------------------------------
 
 const freeqSession = loadFreeqSession();
+const requireAuth =
+  process.env.IRC_REQUIRE_AUTH === "0" ||
+  process.env.IRC_REQUIRE_AUTH === "false"
+    ? false
+    : process.env.IRC_REQUIRE_AUTH === "1" ||
+      process.env.IRC_REQUIRE_AUTH === "true" ||
+      String(IRC_HOST).includes("freeq") ||
+      !!freeqSession;
+
 if (freeqSession) {
   log(`freeq session → ${freeqSession.pds_url} as ${freeqSession.handle}`);
+} else if (requireAuth) {
+  log(
+    "no freeq session; bridge will refuse Guest and retry (rook login + sync-freeq-session)",
+  );
 } else {
   log("no freeq session; guest/plain SASL only");
 }
@@ -935,8 +1163,9 @@ const irc = new IrcClient({
   tls: IRC_TLS,
   owners: IRC_OWNERS,
   freeqSession,
-  onMessage: (from, target, text, context, meta) => {
-    void postInbound(from, target, text, context, meta);
+  requireAuth,
+  onMessage: (from, target, text, meta) => {
+    void postInbound(from, target, text, meta);
   },
 });
 
@@ -949,11 +1178,248 @@ process.on("SIGINT", () => {
   process.exit(0);
 });
 
+// ---------------------------------------------------------------------------
+// AV ensure + radio (orchestrates TAGMSG + eve-av-bridge)
+// ---------------------------------------------------------------------------
+
+function newAvInstance() {
+  return Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, "0");
+}
+
+async function discoverActiveSession(channel) {
+  const encoded = encodeURIComponent(channel);
+  const url = `${FREEQ_API_BASE}/api/v1/channels/${encoded}/sessions`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const active = json?.active;
+    if (!active || active.state !== "Active") return null;
+    return typeof active.id === "string" ? active.id : null;
+  } catch (e) {
+    log(`discover session failed: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+}
+
+/** Fetch freeq session roster (authoritative nick/instance for MoQ paths). */
+async function fetchSessionRoster(sessionId) {
+  const url = `${FREEQ_API_BASE}/api/v1/sessions/${encodeURIComponent(sessionId)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+  if (!res.ok) throw new Error(`session roster HTTP ${res.status}`);
+  return res.json();
+}
+
+/**
+ * MoQ broadcast path MUST use the nick freeq recorded on the roster for our
+ * instance — freeq clients subscribe via roster, not MoQ announce alone.
+ * Publishing as `eve~x` while roster says `GuestN~x` → clients never hear us.
+ */
+async function rosterNickForInstance(sessionId, instance, fallbackNick) {
+  for (let i = 0; i < 8; i++) {
+    try {
+      const data = await fetchSessionRoster(sessionId);
+      const parts = Array.isArray(data?.participants) ? data.participants : [];
+      const me = parts.find((p) => p?.instance_id === instance);
+      if (me?.nick) {
+        log(
+          `roster nick for instance ${instance}: ${me.nick} (did=${me.did ?? "?"})`,
+        );
+        return String(me.nick);
+      }
+    } catch (e) {
+      log(`roster poll: ${e instanceof Error ? e.message : e}`);
+    }
+    await sleep(250);
+  }
+  log(`roster nick missing for ${instance}; fallback ${fallbackNick}`);
+  return fallbackNick;
+}
+
+/**
+ * Ensure we are joined to an AV call on `channel`, connect media plane.
+ * @returns {{ sessionId, instance, sfuUrl, channel, nick }}
+ */
+async function ensureAv(channel = IRC_CHANNEL, title = "eve radio") {
+  const ch = channel.startsWith("#") ? channel : `#${channel}`;
+  // freeq records the IRC nick at av_join time. Guest* nicks break MoQ mesh
+  // (clients subscribe to GuestN~inst while we might publish eve~inst).
+  if (/^guest/i.test(irc.nick)) {
+    throw new Error(
+      `IRC nick is ${irc.nick} (SASL guest) — fix freeq SASL so nick is eve before radio`,
+    );
+  }
+
+  let sessionId = await discoverActiveSession(ch);
+  const instance = newAvInstance();
+
+  if (sessionId) {
+    log(`av join existing ${sessionId} on ${ch} as ${irc.nick}~${instance}`);
+    irc.avJoin(ch, sessionId, instance);
+  } else {
+    log(`av start on ${ch} as ${irc.nick}~${instance}`);
+    const wait = irc.waitAvStarted(ch, 10_000);
+    irc.avStart(ch, instance, title);
+    sessionId = await wait;
+    // start already joined us as initiator; still join if needed for presence
+    irc.avJoin(ch, sessionId, instance);
+  }
+
+  // Authoritative nick from freeq roster (matches client subscribe paths).
+  const nick = await rosterNickForInstance(sessionId, instance, irc.nick);
+  if (/^guest/i.test(nick)) {
+    throw new Error(
+      `freeq roster has us as ${nick} — SASL not applied at join; refresh session and retry`,
+    );
+  }
+
+  // Connect MoQ media on av-bridge — path = session/nick~instance
+  const body = {
+    sfu_url: SFU_URL_RESOLVED,
+    session_id: sessionId,
+    nick,
+    instance,
+    channel: ch,
+    // Video tile for radio visualizer (ICY title + DSP waveform/spectrum).
+    audio_only: false,
+  };
+  const res = await fetch(`${AV_BRIDGE_URL}/v1/session/connect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json.ok === false) {
+    throw new Error(json.error || `av-bridge connect ${res.status}`);
+  }
+
+  log(
+    `media path ${sessionId}/${nick}~${instance} (must match freeq roster for clients to hear)`,
+  );
+
+  return {
+    sessionId,
+    instance,
+    sfuUrl: SFU_URL_RESOLVED,
+    channel: ch,
+    nick,
+    broadcastPath: `${sessionId}/${nick}~${instance}`,
+    session: json.session,
+  };
+}
+
+async function playRadio({ url, channel, title }) {
+  if (!url) throw new Error("url required");
+  let av;
+  try {
+    av = await ensureAv(channel ?? IRC_CHANNEL, title ?? "eve radio");
+  } catch (e) {
+    // Media may already be up from a prior call; still try play.
+    log(
+      `ensureAv: ${e instanceof Error ? e.message : e}; trying radio play anyway`,
+    );
+    av = { channel: channel ?? IRC_CHANNEL, error: String(e) };
+  }
+  const res = await fetch(`${AV_BRIDGE_URL}/v1/radio/play`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json.ok === false) {
+    throw new Error(json.error || `radio play ${res.status}`);
+  }
+  return { av, radio: json.radio };
+}
+
+async function stopRadio() {
+  try {
+    await fetch(`${AV_BRIDGE_URL}/v1/radio/stop`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (e) {
+    log(`radio stop: ${e instanceof Error ? e.message : e}`);
+  }
+  return { ok: true };
+}
+
+// Minimal control HTTP for eve tools (loopback).
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8") || "{}";
+        resolve(JSON.parse(raw));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+const controlServer = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url || "/", `http://${CONTROL_HOST}`);
+    if (req.method === "GET" && url.pathname === "/health") {
+      sendJson(res, 200, {
+        ok: true,
+        nick: irc.nick,
+        channel: IRC_CHANNEL,
+        avBridge: AV_BRIDGE_URL,
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/av/ensure") {
+      const body = await readJson(req);
+      const out = await ensureAv(body.channel, body.title);
+      sendJson(res, 200, { ok: true, ...out });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/radio/play") {
+      const body = await readJson(req);
+      const out = await playRadio(body);
+      sendJson(res, 200, { ok: true, ...out });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/radio/stop") {
+      const out = await stopRadio();
+      sendJson(res, 200, out);
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: "not found" });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log(`control error: ${msg}`);
+    sendJson(res, 500, { ok: false, error: msg });
+  }
+});
+
+controlServer.listen(CONTROL_PORT, CONTROL_HOST, () => {
+  log(`control HTTP http://${CONTROL_HOST}:${CONTROL_PORT} (radio/av)`);
+});
+
 await waitForEve();
 irc.start();
 // SSE loop in parallel (reconnects forever)
 void runSseLoop(irc);
 
 log(
-  `running nick=${IRC_NICK} channel=${IRC_CHANNEL} eve=${EVE_URL} inbound=${INBOUND_PATH} out=${OUT_SSE_PATH} contextLines=${CONTEXT_LINES}`,
+  `running preferredNick=${IRC_NICK} channel=${IRC_CHANNEL} requireAuth=${requireAuth} eve=${EVE_URL} inbound=${INBOUND_PATH} out=${OUT_SSE_PATH} avBridge=${AV_BRIDGE_URL}`,
 );

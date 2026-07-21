@@ -4,8 +4,9 @@
 
 - **Model**: OpenCode Zen `deepseek-v4-flash-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + IRC via **irc-bridge** (POST `/irc/inbound` + SSE `/irc/out`)
-- **Tools**: cowsay, ATProto, rook/thermals, Anna's Archive (`anna_search`, `anna_download`, …), `guess_emotion`
-- **Skills**: `vit`, `vit-request-watch`, `anna`, `freeq-irc`, `irc-backlog`, **`embody-emotion`** (tone; no "I have no feelings" dodge)
+- **AV (optional)**: **av-bridge** (Rust) — freeq MoQ media plane + internet radio (`av-bridge/`, freeq `eve-av-bridge`)
+- **Tools**: cowsay, ATProto, rook/thermals, Anna, `guess_emotion`, **`play_radio` / `stop_radio`** (stream to freeq AV)
+- **Skills**: `vit`, `vit-request-watch`, `anna`, `freeq-irc`, `irc-backlog`, `embody-emotion`, **`freeq-radio`**
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 

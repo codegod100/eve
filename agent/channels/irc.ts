@@ -104,35 +104,25 @@ export default defineChannel<IrcState, { state: IrcState }, IrcReceiveTarget>({
         from: string;
         target: string;
         text: string;
-        /** Recent channel scrollback; each string becomes a user-role context msg. */
-        context?: string[];
       };
-      const context = Array.isArray(body.context)
-        ? body.context.filter(
-            (s): s is string => typeof s === "string" && s.trim().length > 0,
-          )
-        : undefined;
       try {
-        // SendPayload.context is eve's dedicated "context section" — each
-        // string is appended as role:user before the delivery message.
-        await send(
-          {
-            message: body.text,
-            ...(context?.length ? { context } : {}),
+        // Delivery message = the mention only (prefixed with speaker nick so
+        // the model knows who to address). Do NOT pass SendPayload.context:
+        // eve injects those as role:user history and models answer every line
+        // (old mentions, rejoin scrollback, etc.).
+        const nick = String(body.from ?? "").trim() || "someone";
+        await send(`<${nick}> ${body.text}`, {
+          auth: {
+            authenticator: "irc",
+            principalType: "user",
+            principalId: body.from,
+            attributes: { target: body.target },
           },
-          {
-            auth: {
-              authenticator: "irc",
-              principalType: "user",
-              principalId: body.from,
-              attributes: { target: body.target },
-            },
-            // Per-message token so a stuck prior turn does not block the next.
-            continuationToken: `${body.from}:${Date.now()}`,
-            state: { from: body.from, target: body.target },
-            title: `irc: ${body.from}`,
-          },
-        );
+          // Per-message token so a stuck prior turn does not block the next.
+          continuationToken: `${body.from}:${Date.now()}`,
+          state: { from: body.from, target: body.target },
+          title: `irc: ${body.from}`,
+        });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const target = body.target || IRC_CHANNEL;
@@ -214,10 +204,22 @@ export default defineChannel<IrcState, { state: IrcState }, IrcReceiveTarget>({
 
   events: {
     "message.completed"(data, channel) {
-      const text = data.message;
+      let text = data.message;
       if (!text) return;
       const target = channel.state.target ?? channel.state.from ?? IRC_CHANNEL;
       if (!target) return;
+      // IRC highlight: ensure user replies start with "nick: …"
+      // (model is also instructed to do this; this is the hard guarantee).
+      const from = channel.state.from;
+      if (from && from !== "schedule") {
+        const stripped = text.replace(/^\s+/, "");
+        const prefix = `${from}:`;
+        if (!stripped.toLowerCase().startsWith(prefix.toLowerCase())) {
+          text = `${from}: ${stripped}`;
+        } else {
+          text = stripped;
+        }
+      }
       broadcastPrivmsg(target, text);
     },
     "turn.failed"(data, channel) {

@@ -7,15 +7,16 @@ irc.freeq.at  ←TLS→  irc-bridge  ──POST /irc/inbound──►  eve :8000
                               ◄──SSE  /irc/out──────────  eve
 ```
 
-1. Live PRIVMSGs (after join backlog) go into a per-target ring buffer.
-2. A mention → bridge immediately 👀-reacts the message (TAGMSG `+react`
-   / `+reply=<msgid>`) so the user sees work started, then `POST`s
-   `{from,target,text,context,msgid}` to eve. `context` is recent scrollback.
-3. Eve runs the agent turn; `context` is injected as user-role messages
-   before the mention (`SendPayload.context`).
+1. Channel PRIVMSGs after JOIN are ignored until the join backlog ends
+   (`IRC_BACKLOG_*` min/gap/max).
+2. A live mention → bridge immediately 👀-reacts (TAGMSG `+react` /
+   `+reply=<msgid>`), then `POST`s `{from,target,text,msgid}` to eve.
+   **No scrollback** is attached — eve's `SendPayload.context` becomes
+   `role:user` history and models answer every historical line, so we send
+   only the mention body.
+3. Eve runs the agent turn on that single message.
 4. On `message.completed`, eve pushes an SSE `privmsg` event.
-5. Bridge reads SSE, sends `PRIVMSG` on IRC, and also records its own reply
-   in the ring buffer.
+5. Bridge reads SSE and sends `PRIVMSG` on IRC.
 
 ## Run
 
@@ -36,7 +37,20 @@ node irc-bridge/server.mjs
 | `IRC_HOST` / `IRC_PORT` / `IRC_TLS` | freeq defaults |
 | `IRC_NICK` / `IRC_CHANNEL` | `eve` / `#test` |
 | `IRC_FREEQ_SESSION` | freeq-tui session JSON |
+| `IRC_REQUIRE_AUTH` | auto-on for freeq hosts; refuse `Guest*` / reconnect until SASL nick is `IRC_NICK` |
 | `IRC_BACKLOG_*` | join history ignore |
-| `IRC_CONTEXT_LINES` | ring buffer size (default `40`) |
-| `IRC_CONTEXT_MAX_CHARS` | max formatted context chars (default `6000`) |
 | `IRC_WORKING_REACT` | emoji for “working on it” (default `👀`) |
+| `IRC_CONTROL_HOST` / `IRC_CONTROL_PORT` | control HTTP (default `127.0.0.1:8791`) |
+| `AV_BRIDGE_URL` | eve-av-bridge base (default `http://127.0.0.1:8790`) |
+| `SFU_URL` | MoQ SFU (default freeq `https://irc.freeq.at:8080/av/moq`) |
+| `FREEQ_API_BASE` | REST for session discovery (default `https://<IRC_HOST>`) |
+
+### Control HTTP (eve tools)
+
+| POST | body | action |
+|------|------|--------|
+| `/av/ensure` | `{ channel?, title? }` | av_start/join + connect media |
+| `/radio/play` | `{ url, channel?, title? }` | ensure AV + stream radio |
+| `/radio/stop` | | stop decode |
+
+Needs **eve-av-bridge** running with **ffmpeg** for radio.
