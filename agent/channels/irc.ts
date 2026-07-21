@@ -104,20 +104,35 @@ export default defineChannel<IrcState, { state: IrcState }, IrcReceiveTarget>({
         from: string;
         target: string;
         text: string;
+        /** Recent channel scrollback; each string becomes a user-role context msg. */
+        context?: string[];
       };
+      const context = Array.isArray(body.context)
+        ? body.context.filter(
+            (s): s is string => typeof s === "string" && s.trim().length > 0,
+          )
+        : undefined;
       try {
-        await send(body.text, {
-          auth: {
-            authenticator: "irc",
-            principalType: "user",
-            principalId: body.from,
-            attributes: { target: body.target },
+        // SendPayload.context is eve's dedicated "context section" — each
+        // string is appended as role:user before the delivery message.
+        await send(
+          {
+            message: body.text,
+            ...(context?.length ? { context } : {}),
           },
-          // Per-message token so a stuck prior turn does not block the next.
-          continuationToken: `${body.from}:${Date.now()}`,
-          state: { from: body.from, target: body.target },
-          title: `irc: ${body.from}`,
-        });
+          {
+            auth: {
+              authenticator: "irc",
+              principalType: "user",
+              principalId: body.from,
+              attributes: { target: body.target },
+            },
+            // Per-message token so a stuck prior turn does not block the next.
+            continuationToken: `${body.from}:${Date.now()}`,
+            state: { from: body.from, target: body.target },
+            title: `irc: ${body.from}`,
+          },
+        );
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const target = body.target || IRC_CHANNEL;

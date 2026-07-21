@@ -47,11 +47,77 @@ const PING_AFTER_MS = envMs("IRC_PING_AFTER_MS", 60_000);
 const DEAD_AFTER_MS = envMs("IRC_DEAD_AFTER_MS", 120_000);
 const TCP_KEEPALIVE_MS = envMs("IRC_TCP_KEEPALIVE_MS", 30_000);
 
+/** How many recent PRIVMSGs (per target) to keep for channel context. */
+const CONTEXT_LINES = envInt("IRC_CONTEXT_LINES", 40);
+/** Cap formatted context size so prompts stay bounded. */
+const CONTEXT_MAX_CHARS = envInt("IRC_CONTEXT_MAX_CHARS", 6_000);
+
 function envMs(name, fallback) {
   const raw = process.env[name];
   if (!raw) return fallback;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function envInt(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Per-target ring buffer (channel scrollback for eve context)
+// ---------------------------------------------------------------------------
+
+/** @type {Map<string, Array<{ from: string, text: string, at: number }>>} */
+const contextBuffers = new Map();
+
+function pushContext(target, from, text) {
+  if (!target || !from) return;
+  const key = target.toLowerCase();
+  let buf = contextBuffers.get(key);
+  if (!buf) {
+    buf = [];
+    contextBuffers.set(key, buf);
+  }
+  const line = String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!line) return;
+  buf.push({ from, text: line.slice(0, 400), at: Date.now() });
+  while (buf.length > CONTEXT_LINES) buf.shift();
+}
+
+/**
+ * Format recent lines for eve's `context` field (user-role messages before
+ * the mention). Omits the triggering mention line when `excludeText` matches
+ * the last entry (mention is the delivery message, not context).
+ */
+function formatContext(target, { excludeFrom, excludeText } = {}) {
+  const buf = contextBuffers.get(String(target).toLowerCase()) ?? [];
+  if (!buf.length) return [];
+  let lines = buf;
+  if (excludeFrom && excludeText) {
+    const last = buf[buf.length - 1];
+    const body = String(excludeText).replace(/\s+/g, " ").trim();
+    if (
+      last &&
+      last.from === excludeFrom &&
+      (last.text === body ||
+        last.text.endsWith(body) ||
+        body.endsWith(last.text))
+    ) {
+      lines = buf.slice(0, -1);
+    }
+  }
+  if (!lines.length) return [];
+  const rendered = lines.map((e) => `<${e.from}> ${e.text}`);
+  let block = `Recent IRC in ${target} (oldest → newest, ${lines.length} lines):\n${rendered.join("\n")}`;
+  if (block.length > CONTEXT_MAX_CHARS) {
+    block = `…(truncated)\n` + block.slice(-(CONTEXT_MAX_CHARS - 14));
+  }
+  return [block];
 }
 
 function log(...args) {
@@ -255,6 +321,8 @@ class IrcClient {
       ];
       for (const c of chunks) this.raw(`PRIVMSG ${target} :${c}`);
     }
+    // Keep our own replies in the ring buffer so the next mention sees them.
+    pushContext(target, this.nick, text);
     log(`→ PRIVMSG ${target}: ${String(text).slice(0, 80)}`);
   }
 
@@ -607,6 +675,8 @@ class IrcClient {
         this.backlogDropped += 1;
         return;
       }
+      // Record every live channel line (including the mention) for scrollback.
+      pushContext(target, from, text);
       const aliases = [
         ...new Set([this.nick, this.preferredNick, "eve", "eve-agent"]),
       ];
@@ -617,8 +687,14 @@ class IrcClient {
       if (!mention.test(text)) return;
       const body = text.replace(mention, "").trim();
       if (!body) return;
-      log(`mention from ${from} in ${target}: ${body.slice(0, 80)}`);
-      this.onMessage(from, target, body);
+      const context = formatContext(target, {
+        excludeFrom: from,
+        excludeText: text,
+      });
+      log(
+        `mention from ${from} in ${target}: ${body.slice(0, 80)} (context ${context.length ? context[0].length : 0} chars)`,
+      );
+      this.onMessage(from, target, body, context);
       return;
     }
     if (this.owners.size && !this.owners.has(from.toLowerCase())) {
@@ -626,7 +702,13 @@ class IrcClient {
       return;
     }
     if (!text.trim()) return;
-    this.onMessage(from, from, text.trim());
+    // DMs: small private buffer so multi-line questions still have prior turns.
+    pushContext(from, from, text);
+    const context = formatContext(from, {
+      excludeFrom: from,
+      excludeText: text,
+    });
+    this.onMessage(from, from, text.trim(), context);
   }
 }
 
@@ -634,8 +716,12 @@ class IrcClient {
 // Eve HTTP: inbound POST + outbound SSE
 // ---------------------------------------------------------------------------
 
-async function postInbound(from, target, text) {
+async function postInbound(from, target, text, context) {
   const url = `${EVE_URL}${INBOUND_PATH}`;
+  const payload = { from, target, text };
+  if (Array.isArray(context) && context.length > 0) {
+    payload.context = context;
+  }
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -643,7 +729,7 @@ async function postInbound(from, target, text) {
         "content-type": "application/json",
         accept: "application/json",
       },
-      body: JSON.stringify({ from, target, text }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(120_000),
     });
     if (!res.ok) {
@@ -766,8 +852,8 @@ const irc = new IrcClient({
   tls: IRC_TLS,
   owners: IRC_OWNERS,
   freeqSession,
-  onMessage: (from, target, text) => {
-    void postInbound(from, target, text);
+  onMessage: (from, target, text, context) => {
+    void postInbound(from, target, text, context);
   },
 });
 
@@ -786,5 +872,5 @@ irc.start();
 void runSseLoop(irc);
 
 log(
-  `running nick=${IRC_NICK} channel=${IRC_CHANNEL} eve=${EVE_URL} inbound=${INBOUND_PATH} out=${OUT_SSE_PATH}`,
+  `running nick=${IRC_NICK} channel=${IRC_CHANNEL} eve=${EVE_URL} inbound=${INBOUND_PATH} out=${OUT_SSE_PATH} contextLines=${CONTEXT_LINES}`,
 );

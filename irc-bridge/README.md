@@ -7,10 +7,14 @@ irc.freeq.at  ←TLS→  irc-bridge  ──POST /irc/inbound──►  eve :8000
                               ◄──SSE  /irc/out──────────  eve
 ```
 
-1. Message arrives on IRC → bridge `POST`s `{from,target,text}` to eve.
-2. Eve runs the agent turn.
-3. On `message.completed`, eve pushes an SSE `privmsg` event.
-4. Bridge reads SSE and sends `PRIVMSG` on IRC.
+1. Live PRIVMSGs (after join backlog) go into a per-target ring buffer.
+2. A mention → bridge `POST`s `{from,target,text,context}` to eve.
+   `context` is recent scrollback for that channel/DM (oldest → newest).
+3. Eve runs the agent turn; `context` is injected as user-role messages
+   before the mention (`SendPayload.context`).
+4. On `message.completed`, eve pushes an SSE `privmsg` event.
+5. Bridge reads SSE, sends `PRIVMSG` on IRC, and also records its own reply
+   in the ring buffer.
 
 ## Run
 
@@ -32,3 +36,5 @@ node irc-bridge/server.mjs
 | `IRC_NICK` / `IRC_CHANNEL` | `eve` / `#test` |
 | `IRC_FREEQ_SESSION` | freeq-tui session JSON |
 | `IRC_BACKLOG_*` | join history ignore |
+| `IRC_CONTEXT_LINES` | ring buffer size (default `40`) |
+| `IRC_CONTEXT_MAX_CHARS` | max formatted context chars (default `6000`) |
