@@ -1,18 +1,15 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import {
-  annaGetJson,
-  normalizeMd5,
-  summarizeRecord,
-} from "../lib/anna.js";
+import { annaGetJson, normalizeMd5, summarizeRecord } from "../lib/anna.js";
 
 export default defineTool({
   description:
-    "Look up one Anna's Archive file by MD5 hash. Returns unified title, " +
-    "author, year, size, languages, identifiers, and whether torrent/download " +
-    "paths exist. Use when the user already has an md5 (from a URL like " +
-    "/md5/<hash> or a prior dump). Not a title search — AA has no public " +
-    "search API; for bulk search use torrents aa_derived_mirror_metadata.",
+    "Look up one Anna's Archive file by MD5 hash only. Returns unified title, " +
+    "author, year, size, languages, identifiers, torrent/download flags. " +
+    "Requires a known md5 (AA /md5/<hash> URL or dump). NOT title/ISBN " +
+    "search — AA has no public search API; do not scrape /search. For ISBN " +
+    "bibliography use openlibrary_isbn; for offline AA search use " +
+    "anna_torrents aa_derived_mirror_metadata (skill anna / llms.txt).",
   inputSchema: z.object({
     md5: z
       .string()
@@ -57,9 +54,7 @@ export default defineTool({
     }
     if (status !== 200) {
       const err =
-        typeof data?.error === "string"
-          ? data.error
-          : `HTTP ${status}`;
+        typeof data?.error === "string" ? data.error : `HTTP ${status}`;
       throw new Error(`Record lookup failed for ${md5}: ${err}`);
     }
 
@@ -76,7 +71,7 @@ export default defineTool({
       note:
         "Per-file JSON is convenient but AA prefers local mirrors of " +
         "aa_derived_mirror_metadata for heavy use. Member fast download: " +
-        "anna_fast_download with ANNA_ARCHIVE_SECRET_KEY. See skill anna.",
+        "anna_fast_download with ANNA_API_KEY. See skill anna.",
     };
   },
   toModelOutput(output) {

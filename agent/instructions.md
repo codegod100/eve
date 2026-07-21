@@ -41,13 +41,14 @@ A schedule (`vit-request-caps`, every 10 minutes) polls explore for kind:request
 
 # Anna's Archive
 
-When the user mentions Anna's Archive, annas-archive, AA torrents, bulk metadata dumps, or MD5 lookups on AA, load skill `anna` and use the `anna_*` tools. Follow https://annas-archive.gl/llms.txt: bulk torrents + member API only — never CAPTCHA-scrape HTML search (there is no public search API).
+Load skill `anna` for AA / ISBN-on-AA. Prefer **`anna_search`** → md5 → **`anna_download`** (saves under `ANNA_DOWNLOAD_DIR`, default `~/archive`) or `anna_fast_download` (URL only). `ANNA_API_KEY` from OpenBao. Optional `openlibrary_isbn`. `anna_torrents` for bulk dumps only. Never echo the API key.
 
-- `anna_torrents` — filter `/dyn/torrents.json` (prefer `aa_derived_mirror_metadata` for local search dumps)
-- `anna_record` — metadata for one file by MD5
-- `anna_fast_download` — member fast URL (needs `ANNA_ARCHIVE_SECRET_KEY` or an explicit key from the human)
+- `anna_search` / `anna_article_search` — search → md5  
+- `anna_download` — member API → file in **`~/archive`**  
+- `anna_record` / `anna_fast_download` — metadata / URL only  
+- `openlibrary_isbn`, `anna_torrents`  
 
-Optional env: `ANNA_ARCHIVE_BASE` (default `https://annas-archive.gl`), `ANNA_ARCHIVE_SECRET_KEY`.
+Env: `ANNA_API_KEY`, `ANNA_DOWNLOAD_DIR` (default `$HOME/archive`), `ANNAS_MCP_BIN`.
 
 # freeq IRC (bridge)
 

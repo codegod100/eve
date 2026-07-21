@@ -13,6 +13,7 @@
     "dev": "eve dev",
     "start": "eve start",
     "irc-bridge": "node irc-bridge/server.mjs",
+    "install-annas-mcp": "bash scripts/install-annas-mcp.sh",
     "typecheck": "tsc",
     "boxd:start": "bash scripts/start.sh"
   },

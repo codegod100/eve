@@ -4,7 +4,7 @@
 
 - **Model**: OpenCode Zen `deepseek-v4-flash-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + IRC via **irc-bridge** (POST `/irc/inbound` + SSE `/irc/out`)
-- **Tools**: cowsay, ATProto (`lookup_did`, `get_recent_posts`), [rook.host](https://rook.host/) / [thermals.cloud](https://thermals.cloud) board + CLI, Anna's Archive (`anna_torrents`, `anna_record`, `anna_fast_download`)
+- **Tools**: cowsay, ATProto, rook/thermals, Anna's Archive (`anna_search`, `anna_download`, `anna_record`, `anna_fast_download`, …)
 - **Skills**: `vit` (using-vit CLI), `vit-request-watch` (request-cap poll), `anna` (Anna's Archive / llms.txt), `freeq-irc` (IRC nick / SASL session refresh), `irc-backlog` (ignore channel history on JOIN)
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
@@ -50,18 +50,28 @@ Agent-facing docs: https://rook.host/llms.txt · https://thermals.cloud/llms.txt
 
 ## Anna's Archive tools
 
-Programmatic access only — see [llms.txt](https://annas-archive.gl/llms.txt). No HTML search scraping; no public title-search API.
-
 | Tool | Purpose |
 |------|---------|
-| `anna_torrents` | Filter public `/dyn/torrents.json` (in-memory cache ~30m) |
-| `anna_record` | Unified metadata for one MD5 |
-| `anna_fast_download` | Member `/dyn/api/fast_download.json` URL |
+| **`anna_search`** | Books by ISBN/title via [annas-mcp](https://github.com/iosifache/annas-mcp) → **MD5s** |
+| **`anna_download`** | Member API → save file under **`~/archive`** (or `ANNA_DOWNLOAD_DIR`) |
+| `anna_article_search` | Papers by DOI/keywords (annas-mcp) |
+| `openlibrary_isbn` | Open Library bibliography |
+| `anna_record` | Unified AA metadata for one MD5 |
+| `anna_fast_download` | Member API → URL only (`ANNA_API_KEY`) |
+| `anna_torrents` | Bulk torrent catalog (large dumps) |
 
-| Variable | Default / notes |
-|----------|-----------------|
-| `ANNA_ARCHIVE_BASE` | `https://annas-archive.gl` |
-| `ANNA_ARCHIVE_SECRET_KEY` | Membership secret key (optional; for fast downloads) |
+**Single-book flow:** `anna_search` → pick md5 → **`anna_download`** (or `anna_fast_download` for URL only).
+
+| Variable | Notes |
+|----------|--------|
+| `ANNA_API_KEY` | OpenBao membership key for JSON download API |
+| `ANNA_DOWNLOAD_DIR` | Default `$HOME/archive` |
+| `ANNAS_MCP_BIN` | Optional path to `annas-mcp` |
+| `ANNA_ARCHIVE_BASE` | Default `https://annas-archive.gl` |
+
+```bash
+bash scripts/install-annas-mcp.sh   # → ~/.local/bin/annas-mcp
+```
 
 Skill: `load_skill` → `anna`.
 

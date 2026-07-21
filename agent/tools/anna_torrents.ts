@@ -1,10 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import {
-  fetchTorrents,
-  formatBytes,
-  type AnnaTorrent,
-} from "../lib/anna.js";
+import { fetchTorrents, formatBytes, type AnnaTorrent } from "../lib/anna.js";
 
 const torrentOut = z.object({
   group_name: z.string(),
@@ -29,11 +25,12 @@ const torrentOut = z.object({
 
 export default defineTool({
   description:
-    "List/filter Anna's Archive torrents from the public Torrents JSON API " +
-    "(/dyn/torrents.json). Use for bulk data discovery (metadata dumps, " +
-    "collections to seed). Prefer group_name=aa_derived_mirror_metadata for " +
-    "searchable ElasticSearch/MariaDB dumps. Does NOT search book titles — " +
-    "there is no public search API. Do not scrape HTML pages.",
+    "List/filter Anna's Archive torrents (/dyn/torrents.json) — the primary " +
+    "robot access path in llms.txt. For ISBN/title 'search on AA', ALWAYS " +
+    "call this with group_name=aa_derived_mirror_metadata and return the " +
+    "newest dump's display_name, data size, seeders, and magnet/url so the " +
+    "human can search ISBN→md5 offline. Not live title search. Never scrape " +
+    "/search. Bibliography: openlibrary_isbn; one file: anna_record (md5).",
   inputSchema: z.object({
     group_name: z
       .string()
@@ -49,7 +46,9 @@ export default defineTool({
     is_metadata: z
       .boolean()
       .optional()
-      .describe("If true, only metadata torrents; if false, only file collections."),
+      .describe(
+        "If true, only metadata torrents; if false, only file collections.",
+      ),
     query: z
       .string()
       .optional()
@@ -89,7 +88,9 @@ export default defineTool({
       .boolean()
       .optional()
       .default(false)
-      .describe("Bypass the 30-minute in-memory cache and re-fetch torrents.json."),
+      .describe(
+        "Bypass the 30-minute in-memory cache and re-fetch torrents.json.",
+      ),
   }),
   outputSchema: z.object({
     total_matching: z.number(),

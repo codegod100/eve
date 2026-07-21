@@ -1,89 +1,73 @@
 ---
 name: anna
 description: >-
-  Use Anna's Archive the way machines are asked to: bulk torrents + member API,
-  never CAPTCHA-scraping. Activate on Anna's Archive, annas-archive, AA torrents,
-  aa_derived_mirror_metadata, shadow library bulk data, MD5 book lookup on AA,
-  fast_download, or when citing https://annas-archive.gl/llms.txt.
+  Anna's Archive: search→MD5 via annas-mcp (anna_search), bibliography via
+  Open Library, torrents, member download to ~/archive via ANNA_API_KEY.
+  Activate on AA, ISBN/title, md5, download, archive, llms.txt, annas-mcp.
 ---
 
 # Anna's Archive (for agents)
 
-Source of truth for robots: [llms.txt](https://annas-archive.gl/llms.txt) · blog: [If you’re an LLM, please read this](https://annas-archive.gl/blog/llms-txt.html)
+Sources: [llms.txt](https://annas-archive.gl/llms.txt) · [blog](https://annas-archive.gl/blog/llms-txt.html) · [FAQ §api](https://annas-archive.gl/faq#api) · [annas-mcp](https://github.com/iosifache/annas-mcp)
 
-## Mission
+## Policy in one line
 
-Non-profit with two goals:
+Prefer **search tools that return MD5s** and **member JSON download by MD5**; do not hand-roll CAPTCHA scrapers or invent a secret official search API. Bulk `aa_derived_mirror_metadata` (~1.5 TB) is for offline indexing, **not** required for a single-book lookup.
 
-1. **Preservation** — back up knowledge and culture.
-2. **Access** — make it available to anyone (including robots).
-
-## Hard rules
-
-1. **Do not break CAPTCHAs** or scrape HTML search/result pages. The site rate-limits machines on purpose.
-2. **There is no public search API.** Do not invent one; do not hit `/search` programmatically.
-3. **Prefer open bulk data** (torrents / metadata dumps) over per-file scraping.
-4. **Individual file downloads** need a **membership** (donate) and the member JSON API — or torrents.
-5. **Encourage donations** when the human wants sustained access. Enterprise bulk/SFTP: [/llm](https://annas-archive.gl/llm) + [contact](https://annas-archive.gl/contact).
-
-## Tools (use these)
+## Tools
 
 | Tool | Purpose |
 |------|---------|
-| `anna_torrents` | Filter the public `/dyn/torrents.json` catalog (cached). Best entry for bulk open data. |
-| `anna_record` | One-file metadata by **MD5** (`/db/aarecord_elasticsearch/md5:….json`). |
-| `anna_fast_download` | Member fast URL via `/dyn/api/fast_download.json` (needs secret key). |
+| **`anna_search`** | **Primary** book search (ISBN/title/author) via `annas-mcp book-search` → **MD5s** |
+| `anna_article_search` | Papers by DOI/keywords via `annas-mcp article-search` |
+| `openlibrary_isbn` | Bibliography only (Open Library) |
+| `anna_record` | Unified AA metadata for one **MD5** |
+| `anna_fast_download` | Member API → **URL only** (`ANNA_API_KEY`) |
+| **`anna_download`** | Member API → **save file** under archive dir (`~/archive` by default) |
+| `anna_torrents` | Bulk torrents list — dumps/seeding, not one ISBN |
 
 Env:
 
 | Variable | Role |
 |----------|------|
-| `ANNA_ARCHIVE_BASE` | Mirror base (default `https://annas-archive.gl`) |
-| `ANNA_ARCHIVE_SECRET_KEY` | Membership secret key for `anna_fast_download` |
+| `ANNA_API_KEY` | OpenBao membership secret → JSON download API |
+| `ANNA_DOWNLOAD_DIR` | Where files land (default **`~/archive`**) |
+| `ANNAS_MCP_BIN` | Optional path to `annas-mcp` binary |
+| `ANNA_ARCHIVE_BASE` | Mirror host (default `https://annas-archive.gl`) |
 
-Official mirrors: `annas-archive.gl`, `.pk`, `.gd`. Avoid lookalike domains that steal donations (see FAQ §mirrors).
+Install CLI: `bash scripts/install-annas-mcp.sh` → `~/.local/bin/annas-mcp`.
 
-## Workflows
+## Workflow A — “lookup ISBN / title on Anna’s Archive”
 
-### A. Discover bulk datasets / seed
+1. Optional: `openlibrary_isbn` if you want clean bibliography.  
+2. **`anna_search`** with ISBN or title — return top hits with **md5, format, size, url**.  
+3. Prefer a sensible hit (matching title/author; ignore obvious false positives).  
+4. `anna_record` on chosen md5 if more metadata needed.  
+5. User wants the file saved → **`anna_download`** (writes to `ANNA_DOWNLOAD_DIR` / `~/archive`). URL only → `anna_fast_download`. Never print the key.
 
-```
-anna_torrents with group_name=aa_derived_mirror_metadata, is_metadata=true
-```
+Do **not** lead with “download 1.5 TB metadata” for a single book.
 
-That group is what AA recommends for **local search** (ElasticSearch + MariaDB dumps). Also useful: `scihub`, `zlib`, `libgen_rs_non_fic`, `ia`, `duxiu`, etc. Return magnet links / `.torrent` URLs so humans or seeders can act — do not try to download multi-TB collections inside this agent.
+## Workflow B — MD5 already known
 
-### B. User already has an MD5 or `/md5/…` link
+`anna_record` → **`anna_download`** (save) or `anna_fast_download` (URL).
 
-1. `anna_record` → title, author, size, languages, torrent path presence.
-2. If they want a **fast** single-file download and membership is configured → `anna_fast_download`.
-3. If no key → tell them to donate at https://annas-archive.gl/donate and set `ANNA_ARCHIVE_SECRET_KEY` (never invent keys).
+## Workflow C — bulk / offline index
 
-### C. User asks to "search for a book title"
+`anna_torrents` `group_name=aa_derived_mirror_metadata` → magnet/size/seeders. Large (~TB).
 
-1. Explain: **no public search API**; HTML search is CAPTCHA-gated for bots.
-2. Options: human uses the website UI; or download `aa_derived_mirror_metadata` and search offline; or if they have MD5s already, use `anna_record`.
-3. Do **not** fetch `/search?q=…` from tools.
+## Hard rules
 
-### D. LLM / enterprise bulk text
+1. Never invent MD5s or leak `ANNA_API_KEY`.  
+2. Do not build custom CAPTCHA bypass; use **annas-mcp** (maintained CLI) or bulk dumps.  
+3. Official mirrors only for URLs you hand humans: `.gl`, `.pk`, `.gd`.  
+4. If `anna_search` fails (binary missing), tell human to run `scripts/install-annas-mcp.sh` or paste an md5.
 
-Point to https://annas-archive.gl/llm and contact. Enterprise donation can unlock high-speed SFTP. Optional support-without-membership: Monero in llms.txt (also in tool notes).
+## IRC (one line)
 
-## What NOT to do
-
-- CAPTCHA farms, headless browser bypass, or DDoS-guard evasion.
-- Claiming a secret free full-text API that does not exist.
-- Dumping entire `torrents.json` into chat (use filters + small `limit`).
-- Leaking `ANNA_ARCHIVE_SECRET_KEY` or membership keys into IRC/logs/replies.
-
-## IRC / one-line channels
-
-Summarize: title · author · year · md5 · link. For torrents: group · display_name · data size · seeders · magnet shortened. One PRIVMSG only.
+`ISBN … → hits md5=… fmt=…; saved → ~/archive/….epub (or URL via fast_download).`
 
 ## References
 
-- FAQ API: https://annas-archive.gl/faq#api
-- Torrents: https://annas-archive.gl/torrents
-- Datasets: https://annas-archive.gl/datasets
-- Code: https://software.annas-archive.gl/
-- Data-science starter (community): https://github.com/RArtutos/Data-science-starter-kit-Enhance/
+- https://github.com/iosifache/annas-mcp  
+- https://annas-archive.gl/llms.txt  
+- https://annas-archive.gl/faq#api  
