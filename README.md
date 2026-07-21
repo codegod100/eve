@@ -2,9 +2,11 @@
 
 [eve.dev](https://eve.dev) agent deployed on [eve.boxd.sh](https://eve.boxd.sh).
 
-- **Model**: OpenCode Zen `hy3-free` (OpenAI-compatible Chat Completions)
+- **Model**: OpenCode Zen `north-mini-code-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + custom IRC (`agent/channels/irc.ts`)
-- **Tools**: cowsay, ATProto (`lookup_did`, `get_recent_posts`), [rook.host](https://rook.host/) / [thermals.cloud](https://thermals.cloud) board + CLI
+- **Tools**: cowsay, ATProto (`lookup_did`, `get_recent_posts`), [rook.host](https://rook.host/) / [thermals.cloud](https://thermals.cloud) board + CLI, Anna's Archive (`anna_torrents`, `anna_record`, `anna_fast_download`)
+- **Skills**: `vit` (using-vit CLI), `vit-request-watch` (request-cap poll), `anna` (Anna's Archive / llms.txt), `freeq-irc` (IRC nick / SASL session refresh)
+- **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 
 ## Layout
@@ -14,11 +16,17 @@ agent/
   agent.ts           # model + agent definition
   instructions.md
   channels/          # eve.ts, irc.ts
-  lib/               # thermals HTTP + rook CLI helpers
-  tools/             # cowsay, ATProto, thermals_*, rook_*
+  lib/               # thermals, rook CLI, anna HTTP + torrent cache
+  tools/             # cowsay, ATProto, thermals_*, rook_*, anna_*
+  skills/vit/        # using-vit skill (SKILL.md + COMMANDS.md)
+  skills/vit-request-watch/
+  skills/anna/       # Anna's Archive agent procedure (llms.txt)
+  skills/freeq-irc/  # freeq Guest-nick / SASL fix (rook → freeq session)
+  schedules/         # vit-request-caps every 10m → IRC
 scripts/
   fetch-keys.sh      # OpenBao KV → export KEY=VALUE
   start.sh           # boxd boot: fetch keys + eve dev :8000
+  sync-freeq-session.mjs  # rook OAuth → freeq SASL session files
 flake.nix            # nix develop shell (nodejs 24, curl, jq)
 ```
 
@@ -45,6 +53,36 @@ Local CLI ([`@solpbc/rook`](https://www.npmjs.com/package/@solpbc/rook)):
 Optional env: `ROOK_IDENTITY_FILE`, `THERMALS_URL` (default `https://thermals.cloud`).
 
 Agent-facing docs: https://rook.host/llms.txt · https://thermals.cloud/llms.txt
+
+## Anna's Archive tools
+
+Programmatic access only — see [llms.txt](https://annas-archive.gl/llms.txt). No HTML search scraping; no public title-search API.
+
+| Tool | Purpose |
+|------|---------|
+| `anna_torrents` | Filter public `/dyn/torrents.json` (in-memory cache ~30m) |
+| `anna_record` | Unified metadata for one MD5 |
+| `anna_fast_download` | Member `/dyn/api/fast_download.json` URL |
+
+| Variable | Default / notes |
+|----------|-----------------|
+| `ANNA_ARCHIVE_BASE` | `https://annas-archive.gl` |
+| `ANNA_ARCHIVE_SECRET_KEY` | Membership secret key (optional; for fast downloads) |
+
+Skill: `load_skill` → `anna`.
+
+## freeq IRC nick / SASL
+
+If the bot appears as `Guest…` or logs `SASL failed (904)`, the freeq OAuth session expired.
+
+```bash
+# on the eve VM
+npx --yes @solpbc/rook login
+node scripts/sync-freeq-session.mjs   # or /home/boxd/my-agent/scripts/…
+# restart agent (start.sh)
+```
+
+Skill: `load_skill` → `freeq-irc`. Target nick: `eve` / `eve.rookery.boxd.sh`.
 
 ## Local dev
 
@@ -77,6 +115,21 @@ Optional IRC env (defaults match freeq):
 | `IRC_CHANNEL` | `#test` |
 | `IRC_PASSWORD` | (unset) |
 | `IRC_OWNERS` | (unset) |
+
+### vit request-cap schedule
+
+| Variable | Default |
+|----------|---------|
+| `VIT_CONTROLLED_BEACONS` | codegod100 repo beacons (comma-separated overrides) |
+| `VIT_CONTROLLED_BEACON_OWNERS` | `codegod100` (substring match on beacon) |
+| `VIT_REQUEST_REPORT_EMPTY` | unset = quiet when no matches; `1` = always report |
+| `VIT_EXPLORE_URL` | `https://explore.v-it.org` |
+
+`npm run boxd:start` runs `eve build && eve start` so the cron fires. Locally with `eve dev`, fire once:
+
+```bash
+curl -X POST http://127.0.0.1:8000/eve/v1/dev/schedules/vit-request-caps
+```
 
 ## Framework docs
 

@@ -19,6 +19,10 @@ import * as tls from "node:tls";
 //   IRC_PING_AFTER_MS   — send client PING if no RX for this long (default 60000)
 //   IRC_DEAD_AFTER_MS   — force reconnect if no RX for this long (default 120000)
 //   IRC_TCP_KEEPALIVE_MS — TCP keepalive initial delay (default 30000)
+//
+// Singleton: exactly one live IRC TCP/TLS socket per process. Module reloads
+// (eve dev HMR), schedule imports of this channel, and reconnect races must not
+// spawn additional connections.
 
 type IrcState = {
   from: string | null;
@@ -76,6 +80,24 @@ const CLIENT_PING_AFTER_MS = envMs("IRC_PING_AFTER_MS", 60_000);
 const DEAD_AFTER_MS = envMs("IRC_DEAD_AFTER_MS", 120_000);
 const TCP_KEEPALIVE_MS = envMs("IRC_TCP_KEEPALIVE_MS", 30_000);
 
+/** process-global key so HMR / multi-import share one client */
+const GLOBAL_IRC_KEY = Symbol.for("eve.agent.irc.client");
+
+type GlobalIrcBag = {
+  client: IrcClient | null;
+  signalHandlersBound: boolean;
+};
+
+function globalBag(): GlobalIrcBag {
+  const g = globalThis as typeof globalThis & {
+    [GLOBAL_IRC_KEY]?: GlobalIrcBag;
+  };
+  if (!g[GLOBAL_IRC_KEY]) {
+    g[GLOBAL_IRC_KEY] = { client: null, signalHandlersBound: false };
+  }
+  return g[GLOBAL_IRC_KEY];
+}
+
 class IrcClient {
   private socket: Socket | null = null;
   private tlsSock: TLSSocket | null = null;
@@ -83,11 +105,20 @@ class IrcClient {
   private joined = false;
   private joinedAt = 0; // ms timestamp of our own JOIN echo; used to drop history backlog
   private stopped = false;
-  private reconnectTimer: number | undefined = undefined;
-  private watchdogTimer: number | undefined = undefined;
-  private connecting = false; // mutex: only one connect() may run at a time
+  private started = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+  private watchdogTimer: ReturnType<typeof setInterval> | undefined = undefined;
+  /** True while a connect attempt is open (until register-ready or failed). */
+  private connecting = false;
+  /**
+   * Bumps on every intentional teardown / new connect. Close handlers from an
+   * old generation must not schedule reconnects (that was spawning N sockets).
+   */
+  private generation = 0;
   private lastRxAt = 0;
   private lastPingAt = 0;
+  /** Recent PRIVMSGs seen, used to drop duplicate deliveries from the server. */
+  private recentMsgs: { key: string; at: number }[] = [];
   readonly host: string;
   readonly port: number;
   /** Preferred nick from config; re-attempted on every reconnect. */
@@ -98,7 +129,7 @@ class IrcClient {
   readonly password: string | undefined;
   readonly tls: boolean;
   readonly owners: Set<string>;
-  readonly onMessage: (from: string, target: string, text: string) => void;
+  onMessage: (from: string, target: string, text: string) => void;
 
   constructor(opts: {
     host: string;
@@ -121,7 +152,20 @@ class IrcClient {
     this.onMessage = opts.onMessage;
   }
 
+  /** Idempotent: at most one live connection for this client instance. */
   start() {
+    if (this.stopped) {
+      // Allow restart after stop() (e.g. tests); clear stopped first in stop? no — use reset
+      this.stopped = false;
+    }
+    if (this.started) {
+      // HMR re-import: keep existing socket; only refresh handlers if needed.
+      console.error(
+        `[irc] start() ignored — already running as ${this.nick} → ${this.host}:${this.port}`,
+      );
+      return;
+    }
+    this.started = true;
     this.connect();
     this.startWatchdog();
   }
@@ -132,10 +176,12 @@ class IrcClient {
 
   private startWatchdog() {
     if (this.watchdogTimer !== undefined) return;
-    this.watchdogTimer = setInterval(() => this.watchdogTick(), WATCHDOG_INTERVAL_MS) as unknown as number;
+    this.watchdogTimer = setInterval(
+      () => this.watchdogTick(),
+      WATCHDOG_INTERVAL_MS,
+    );
     // Don't keep the process alive solely for the watchdog.
-    const t = this.watchdogTimer as unknown as { unref?: () => void };
-    t.unref?.();
+    this.watchdogTimer.unref?.();
   }
 
   private stopWatchdog() {
@@ -164,10 +210,46 @@ class IrcClient {
 
     // Proactively PING the server so a half-open socket fails fast (or we get
     // a PONG that refreshes lastRxAt). At most once per CLIENT_PING_AFTER_MS.
-    if (idle >= CLIENT_PING_AFTER_MS && Date.now() - this.lastPingAt >= CLIENT_PING_AFTER_MS) {
+    if (
+      idle >= CLIENT_PING_AFTER_MS &&
+      Date.now() - this.lastPingAt >= CLIENT_PING_AFTER_MS
+    ) {
       this.lastPingAt = Date.now();
-      console.error(`[irc] idle ${Math.round(idle / 1000)}s; sending client PING`);
+      console.error(
+        `[irc] idle ${Math.round(idle / 1000)}s; sending client PING`,
+      );
       this.raw(`PING :eve-keepalive`);
+    }
+  }
+
+  /**
+   * Drop current sockets without treating their close as "unexpected disconnect".
+   * Generation bump makes any in-flight close handlers no-ops.
+   */
+  private detachSockets(reason: string) {
+    this.generation += 1;
+    const gen = this.generation;
+    console.error(`[irc] detach sockets gen=${gen} (${reason})`);
+
+    const tlsSock = this.tlsSock;
+    const sock = this.socket;
+    this.tlsSock = null;
+    this.socket = null;
+    this.joined = false;
+    this.joinedAt = 0;
+    this.buf = "";
+    this.lastRxAt = 0;
+    this.lastPingAt = 0;
+
+    // Remove listeners first so destroy → close cannot schedule reconnect.
+    for (const s of [tlsSock, sock]) {
+      if (!s) continue;
+      try {
+        s.removeAllListeners();
+        s.destroy();
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -175,76 +257,148 @@ class IrcClient {
   private forceReconnect(reason: string) {
     if (this.stopped) return;
     console.error(`[irc] force reconnect (${reason})`);
-    // Destroy first so close handlers fire; scheduleReconnect is idempotent.
-    try {
-      this.tlsSock?.destroy();
-    } catch {
-      /* ignore */
-    }
-    try {
-      this.socket?.destroy();
-    } catch {
-      /* ignore */
-    }
-    this.tlsSock = null;
-    this.socket = null;
-    this.joined = false;
-    this.buf = "";
-    this.lastRxAt = 0;
-    this.lastPingAt = 0;
+    this.clearReconnectTimer();
+    this.connecting = false;
+    this.detachSockets(reason);
     this.scheduleReconnect(2_000);
+  }
+
+  private clearReconnectTimer() {
+    if (this.reconnectTimer === undefined) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
   }
 
   private connect() {
     if (this.stopped) return;
-    // Mutex: only one connect() may run at a time. JS is single-threaded, so
-    // this check-and-set is atomic within one event-loop tick.
     if (this.connecting) {
       console.error(`[irc] connect() already in flight; skipping`);
       return;
     }
+    // If we already have a live socket, do not open another.
+    const live = this.tlsSock ?? this.socket;
+    if (live && !live.destroyed) {
+      console.error(`[irc] connect() skipped — socket already live`);
+      return;
+    }
+
     this.connecting = true;
+    this.clearReconnectTimer();
+    // Bump generation and kill any stale fds before opening a new one.
+    this.detachSockets("connect");
+
+    const gen = this.generation;
+    this.nick = this.preferredNick;
+
+    console.error(
+      `[irc] connect gen=${gen} → ${this.host}:${this.port} (tls=${this.tls}) as ${this.nick}`,
+    );
+
+    let sock: Socket;
     try {
-      // Destroy any stale sockets from a prior connection before opening a new one.
-      this.tlsSock?.destroy();
-      this.socket?.destroy();
+      sock = net.connect(this.port, this.host);
+    } catch (e) {
+      this.connecting = false;
+      console.error(
+        "[irc] net.connect threw:",
+        e instanceof Error ? e.message : e,
+      );
+      this.scheduleReconnect(5_000);
+      return;
+    }
+
+    this.socket = sock;
+    sock.setKeepAlive(true, TCP_KEEPALIVE_MS);
+    sock.setNoDelay(true);
+    sock.setEncoding("utf8");
+
+    const onUnexpectedClose = (label: string) => {
+      // Only the current generation may reconnect.
+      if (gen !== this.generation) {
+        console.error(
+          `[irc] ignore ${label} close from stale gen=${gen} (current=${this.generation})`,
+        );
+        return;
+      }
+      if (this.stopped) return;
+      console.error(`[irc] ${label} closed (gen=${gen}); will reconnect`);
+      this.connecting = false;
       this.tlsSock = null;
       this.socket = null;
-      this.buf = "";
       this.joined = false;
-      this.joinedAt = 0;
-      this.lastRxAt = 0;
-      this.lastPingAt = 0;
-      // Always re-attempt the configured nick on a fresh connection.
-      this.nick = this.preferredNick;
-      const sock = net.connect(this.port, this.host);
-      this.socket = sock;
-      // TCP keepalive catches some dead peers even when app-level PING does not.
-      sock.setKeepAlive(true, TCP_KEEPALIVE_MS);
-      sock.setNoDelay(true);
-      sock.setEncoding("utf8");
-      sock.on("connect", () => {
-        if (this.tls) {
-          const tlsSock = tls.connect({ socket: sock, servername: this.host }, () => {
-            this.tlsSock = tlsSock;
-            this.register();
-          });
-          tlsSock.setEncoding("utf8");
-          tlsSock.on("data", (d: string) => this.ingest(d));
-          tlsSock.on("error", (e) => this.handleErr(e));
-          tlsSock.on("close", () => this.scheduleReconnect());
-        } else {
-          this.register();
+      this.scheduleReconnect(5_000);
+    };
+
+    sock.on("connect", () => {
+      if (gen !== this.generation) {
+        try {
+          sock.destroy();
+        } catch {
+          /* ignore */
         }
-      });
-      if (!this.tls) {
-        sock.on("data", (d: string) => this.ingest(d));
+        return;
       }
-      sock.on("error", (e) => this.handleErr(e));
-      sock.on("close", () => this.scheduleReconnect());
-    } finally {
-      this.connecting = false;
+      if (this.tls) {
+        const tlsSock = tls.connect(
+          { socket: sock, servername: this.host },
+          () => {
+            if (gen !== this.generation) {
+              try {
+                tlsSock.destroy();
+              } catch {
+                /* ignore */
+              }
+              return;
+            }
+            this.tlsSock = tlsSock;
+            this.connecting = false;
+            this.register();
+          },
+        );
+        tlsSock.setEncoding("utf8");
+        tlsSock.on("data", (d: string) => {
+          if (gen !== this.generation) return;
+          this.ingest(d);
+        });
+        tlsSock.on("error", (e) => {
+          if (gen !== this.generation) return;
+          this.connecting = false;
+          this.handleErr(e);
+        });
+        // Prefer TLS close for reconnect; plain sock close under TLS is normal
+        // once TLS owns the stream — do not double-reconnect.
+        tlsSock.on("close", () => onUnexpectedClose("tls"));
+        sock.on("error", (e) => {
+          if (gen !== this.generation) return;
+          this.handleErr(e);
+        });
+        // Under TLS, raw socket close alone is not a reconnect trigger if we
+        // already have tlsSock; only reconnect if TLS never attached.
+        sock.on("close", () => {
+          if (gen !== this.generation) return;
+          if (this.tlsSock) return; // TLS layer owns lifetime
+          this.connecting = false;
+          onUnexpectedClose("tcp(pre-tls)");
+        });
+      } else {
+        this.connecting = false;
+        this.register();
+      }
+    });
+
+    if (!this.tls) {
+      sock.on("data", (d: string) => {
+        if (gen !== this.generation) return;
+        this.ingest(d);
+      });
+      sock.on("close", () => onUnexpectedClose("tcp"));
     }
+
+    sock.on("error", (e) => {
+      if (gen !== this.generation) return;
+      this.connecting = false;
+      this.handleErr(e);
+    });
   }
 
   private register() {
@@ -272,7 +426,8 @@ class IrcClient {
   }
 
   private handle(line: string) {
-    if (line.includes("PRIVMSG")) console.error(`[irc] << ${line.slice(0, 180)}`);
+    if (line.includes("PRIVMSG"))
+      console.error(`[irc] << ${line.slice(0, 180)}`);
     const m = parseIrcLine(line);
     const cmd = m.command.toUpperCase();
     if (cmd === "PING") {
@@ -284,12 +439,19 @@ class IrcClient {
       // updated in ingest; nothing else to do.
       return;
     }
-    if (cmd === "CAP" && m.params[1] === "ACK" && /sasl/.test(m.params[2] ?? "")) {
+    if (
+      cmd === "CAP" &&
+      m.params[1] === "ACK" &&
+      /sasl/.test(m.params[2] ?? "")
+    ) {
       this.raw("AUTHENTICATE PLAIN");
       return;
     }
     if (cmd === "AUTHENTICATE" && m.params[0] === "+") {
-      const blob = Buffer.from(`\0${this.nick}\0${this.password}`, "utf8").toString("base64");
+      const blob = Buffer.from(
+        `\0${this.nick}\0${this.password}`,
+        "utf8",
+      ).toString("base64");
       this.raw(`AUTHENTICATE ${blob}`);
       this.raw("CAP END");
       return;
@@ -313,7 +475,9 @@ class IrcClient {
     if (cmd === "JOIN" && nickFromPrefix(m.prefix) === this.nick) {
       this.joined = true;
       this.joinedAt = Date.now();
-      console.error(`[irc] joined ${this.channel} on ${this.host} as ${this.nick}`);
+      console.error(
+        `[irc] joined ${this.channel} on ${this.host} as ${this.nick}`,
+      );
       return;
     }
     if (cmd === "PRIVMSG") {
@@ -327,10 +491,12 @@ class IrcClient {
 
   private handlePrivmsg(from: string, target: string, text: string) {
     if (from === this.nick) return;
+    if (this.isDuplicatePrivmsg(from, target, text)) return;
     const isChannel = target.startsWith("#") || target.startsWith("&");
     // freeq sends channel history on JOIN; drop channel messages for a short
     // quiet window after our own JOIN echo so backlog doesn't trigger replies.
-    if (isChannel && this.joinedAt && Date.now() - this.joinedAt < 5_000) return;
+    if (isChannel && this.joinedAt && Date.now() - this.joinedAt < 5_000)
+      return;
     let replyTarget = target;
     let body = text;
     if (isChannel) {
@@ -349,8 +515,35 @@ class IrcClient {
     this.onMessage(from, replyTarget, body);
   }
 
+  /**
+   * Some servers / bridges may deliver the same PRIVMSG more than once in quick
+   * succession (echo, retry, or federation fan-out). Deduplicate by
+   * (from, target, text) within a short window so the agent doesn't answer twice.
+   */
+  private isDuplicatePrivmsg(from: string, target: string, text: string): boolean {
+    const now = Date.now();
+    const windowMs = 5_000;
+    // Drop entries older than the window.
+    const cutoff = now - windowMs;
+    let i = 0;
+    while (i < this.recentMsgs.length && this.recentMsgs[i].at < cutoff) {
+      i++;
+    }
+    if (i > 0) this.recentMsgs.splice(0, i);
+
+    const key = `${from}\0${target}\0${text}`;
+    if (this.recentMsgs.some((m) => m.key === key)) {
+      console.error(`[irc] duplicate PRIVMSG dropped: ${from} → ${target}`);
+      return true;
+    }
+    this.recentMsgs.push({ key, at: now });
+    return false;
+  }
+
   sendPrivmsg(target: string, text: string) {
-    console.error(`[irc] sendPrivmsg -> ${target}: ${String(text).slice(0, 60)}`);
+    console.error(
+      `[irc] sendPrivmsg -> ${target}: ${String(text).slice(0, 60)}`,
+    );
     // IRC messages are CRLF-delimited; the server treats the first \r\n as
     // the end of the message. Multi-line content (e.g. ASCII art) must be
     // split into separate PRIVMSGs, one per line. Otherwise only the first
@@ -359,7 +552,9 @@ class IrcClient {
     const lines = String(text).split("\n");
     for (const line of lines) {
       if (!line && lines.length > 1) continue;
-      const chunks = line.match(new RegExp(`[\\s\\S]{1,${maxBody}}`, "g")) ?? [line];
+      const chunks = line.match(new RegExp(`[\\s\\S]{1,${maxBody}}`, "g")) ?? [
+        line,
+      ];
       for (const c of chunks) this.raw(`PRIVMSG ${target} :${c}`);
     }
   }
@@ -367,13 +562,7 @@ class IrcClient {
   private raw(line: string) {
     const s = this.tlsSock ?? this.socket;
     if (!s || s.destroyed) return;
-    const ok = s.write(line + "\r\n");
-    // write() returning false only means backpressure; real failures fire
-    // 'error'. If the socket is already half-dead, the next error/close path
-    // (or the idle watchdog) will reconnect.
-    if (ok === false) {
-      // optional: could pause, but IRC traffic is tiny
-    }
+    s.write(line + "\r\n");
   }
 
   private handleErr(e: unknown) {
@@ -382,27 +571,39 @@ class IrcClient {
 
   private scheduleReconnect(delayMs = 5_000) {
     if (this.stopped) return;
-    if (this.reconnectTimer) return; // already scheduled
+    if (this.reconnectTimer !== undefined) {
+      console.error(`[irc] reconnect already scheduled; not stacking`);
+      return;
+    }
+    if (this.connecting) {
+      console.error(`[irc] reconnect deferred — connect already in flight`);
+      return;
+    }
     console.error(`[irc] reconnecting in ${delayMs / 1000}s`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       this.connect();
-    }, delayMs) as unknown as number;
+    }, delayMs);
+    this.reconnectTimer.unref?.();
   }
 
   stop() {
     this.stopped = true;
+    this.started = false;
+    this.connecting = false;
+    this.clearReconnectTimer();
     this.stopWatchdog();
-    clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = undefined;
-    this.raw("QUIT :eve agent shutting down");
-    this.tlsSock?.destroy();
-    this.socket?.destroy();
+    try {
+      this.raw("QUIT :eve agent shutting down");
+    } catch {
+      /* ignore */
+    }
+    this.detachSockets("stop");
   }
 }
 
 // ---------------------------------------------------------------------------
-// Channel
+// Channel — process-wide singleton client
 // ---------------------------------------------------------------------------
 
 const IRC_HOST = process.env.IRC_HOST ?? "irc.libera.chat";
@@ -418,32 +619,67 @@ const IRC_OWNERS = (process.env.IRC_OWNERS ?? "")
 
 const INBOUND_URL = `http://127.0.0.1:${process.env.PORT ?? 8000}/irc/inbound`;
 
-const irc = new IrcClient({
-  host: IRC_HOST,
-  port: IRC_PORT,
-  nick: IRC_NICK,
-  channel: IRC_CHANNEL,
-  password: IRC_PASSWORD,
-  tls: IRC_TLS,
-  owners: IRC_OWNERS,
-  onMessage: (from, target, text) => {
+function makeOnMessage(): (from: string, target: string, text: string) => void {
+  return (from, target, text) => {
     fetch(INBOUND_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ from, target, text }),
-    }).catch((e) => console.error("[irc] inbound post failed:", e instanceof Error ? e.message : e));
-  },
-});
+    }).catch((e) =>
+      console.error(
+        "[irc] inbound post failed:",
+        e instanceof Error ? e.message : e,
+      ),
+    );
+  };
+}
 
+function getOrCreateIrcClient(): IrcClient {
+  const bag = globalBag();
+  if (bag.client) {
+    // HMR may re-bind inbound handler; keep the same socket.
+    bag.client.onMessage = makeOnMessage();
+    return bag.client;
+  }
+  const client = new IrcClient({
+    host: IRC_HOST,
+    port: IRC_PORT,
+    nick: IRC_NICK,
+    channel: IRC_CHANNEL,
+    password: IRC_PASSWORD,
+    tls: IRC_TLS,
+    owners: IRC_OWNERS,
+    onMessage: makeOnMessage(),
+  });
+  bag.client = client;
+  return client;
+}
+
+const irc = getOrCreateIrcClient();
 irc.start();
-process.on("SIGTERM", () => irc.stop());
-process.on("SIGINT", () => irc.stop());
+
+const bag = globalBag();
+if (!bag.signalHandlersBound) {
+  bag.signalHandlersBound = true;
+  process.on("SIGTERM", () => {
+    globalBag().client?.stop();
+  });
+  process.on("SIGINT", () => {
+    globalBag().client?.stop();
+  });
+}
 
 function isHookConflict(msg: string): boolean {
   return /already in use|HookConflict/i.test(msg);
 }
 
-export default defineChannel<IrcState, IrcCtx>({
+/** Target shape for schedule / cross-channel `receive(irc, { target })`. */
+export type IrcReceiveTarget = {
+  /** IRC destination (#channel or nick). Defaults to IRC_CHANNEL. */
+  channel?: string;
+};
+
+export default defineChannel<IrcState, IrcCtx, IrcReceiveTarget>({
   state: { from: null, target: null },
 
   context(state, _session) {
@@ -454,9 +690,28 @@ export default defineChannel<IrcState, IrcCtx>({
     return { from: state.from, target: state.target };
   },
 
+  // Schedules and other channels hand work here; agent reply is PRIVMSG'd to target.
+  async receive(input, { send }) {
+    const channel =
+      (typeof input.target?.channel === "string" &&
+        input.target.channel.trim()) ||
+      IRC_CHANNEL;
+    const token = `schedule:${channel}`;
+    return send(input.message, {
+      auth: input.auth,
+      continuationToken: token,
+      state: { from: "schedule", target: channel },
+      title: `irc schedule → ${channel}`,
+    });
+  },
+
   routes: [
     POST("/irc/inbound", async (req, { send }) => {
-      const body = (await req.json()) as { from: string; target: string; text: string };
+      const body = (await req.json()) as {
+        from: string;
+        target: string;
+        text: string;
+      };
       try {
         await send(body.text, {
           auth: {
@@ -472,7 +727,10 @@ export default defineChannel<IrcState, IrcCtx>({
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (isHookConflict(msg)) {
-          irc.sendPrivmsg(body.target, `${body.from}: still thinking about your last message — try again in a moment.`);
+          irc.sendPrivmsg(
+            body.target,
+            `${body.from}: still thinking about your last message — try again in a moment.`,
+          );
         } else {
           irc.sendPrivmsg(body.target, `[error] ${msg.slice(0, 200)}`);
         }
@@ -496,7 +754,10 @@ export default defineChannel<IrcState, IrcCtx>({
       // HookConflictError = user sent a 2nd message while a turn was still
       // running. Give a friendly heads-up instead of a raw error.
       if (isHookConflict(String(msg))) {
-        channel.irc.sendPrivmsg(target, `${channel.state.from ?? "you"}: still thinking about your last message — try again in a moment.`);
+        channel.irc.sendPrivmsg(
+          target,
+          `${channel.state.from ?? "you"}: still thinking about your last message — try again in a moment.`,
+        );
         return;
       }
       channel.irc.sendPrivmsg(target, `[error] ${String(msg).slice(0, 300)}`);
@@ -506,7 +767,10 @@ export default defineChannel<IrcState, IrcCtx>({
       if (!target) return;
       const msg = data.details?.message ?? data.message ?? "session failed";
       if (isHookConflict(String(msg))) {
-        channel.irc.sendPrivmsg(target, `${channel.state.from ?? "you"}: still thinking about your last message — try again in a moment.`);
+        channel.irc.sendPrivmsg(
+          target,
+          `${channel.state.from ?? "you"}: still thinking about your last message — try again in a moment.`,
+        );
         return;
       }
       channel.irc.sendPrivmsg(target, `[error] ${String(msg).slice(0, 300)}`);

@@ -32,3 +32,23 @@ Local rook CLI (needs enrollment on this machine):
 - `rook_submit` — fork/push/pr/ship from a local clone; pass a request URI when answering board work
 
 Docs for agents: https://rook.host/llms.txt · https://thermals.cloud/llms.txt · ToS: https://rook.host/tos
+
+# vit (social caps / skills)
+
+When the user mentions vit, beacons, caps, shipping, skimming, following, vetting, or social coding over ATProto, load the `vit` skill (`load_skill` → vit) and use the `vit` CLI via bash. Prefer `vit explore` for discovery; tell humans to run `vit login` / `vit adopt` / `vit vet` themselves.
+
+A schedule (`vit-request-caps`, every 10 minutes) polls explore for kind:request caps on controlled beacons and may hand you a one-line report to post on IRC. When that happens, reply with the given text only (single line, no tools). For manual checks, load skill `vit-request-watch`.
+
+# Anna's Archive
+
+When the user mentions Anna's Archive, annas-archive, AA torrents, bulk metadata dumps, or MD5 lookups on AA, load skill `anna` and use the `anna_*` tools. Follow https://annas-archive.gl/llms.txt: bulk torrents + member API only — never CAPTCHA-scrape HTML search (there is no public search API).
+
+- `anna_torrents` — filter `/dyn/torrents.json` (prefer `aa_derived_mirror_metadata` for local search dumps)
+- `anna_record` — metadata for one file by MD5
+- `anna_fast_download` — member fast URL (needs `ANNA_ARCHIVE_SECRET_KEY` or an explicit key from the human)
+
+Optional env: `ANNA_ARCHIVE_BASE` (default `https://annas-archive.gl`), `ANNA_ARCHIVE_SECRET_KEY`.
+
+# freeq IRC nick / SASL
+
+If the bot is `Guest…`, host is `freeq/guest`, nick is wrong, or logs show `SASL failed (904)`, load skill `freeq-irc`. Fix is: `rook login` → `node scripts/sync-freeq-session.mjs` → restart `/home/boxd/start.sh`. Correct nick is `eve` as `did:plc:76szbe2ywgwb7vzuingj4fhq` on `irc.freeq.at` `#test`.
