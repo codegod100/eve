@@ -18,6 +18,7 @@
   "dependencies": {
     "@ai-sdk/openai": "^4.0.16",
     "@ai-sdk/openai-compatible": "^3.0.12",
+    "@solpbc/rook": "^0.2.0",
     "@vercel/connect": "0.4.0",
     "ai": "^7.0.26",
     "eve": "^0.25.1",

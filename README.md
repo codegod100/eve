@@ -4,7 +4,7 @@
 
 - **Model**: OpenCode Zen `hy3-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + custom IRC (`agent/channels/irc.ts`)
-- **Tools**: cowsay, ATProto `lookup_did`, `get_recent_posts`
+- **Tools**: cowsay, ATProto (`lookup_did`, `get_recent_posts`), [rook.host](https://rook.host/) / [thermals.cloud](https://thermals.cloud) board + CLI
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 
 ## Layout
@@ -14,12 +14,37 @@ agent/
   agent.ts           # model + agent definition
   instructions.md
   channels/          # eve.ts, irc.ts
-  tools/             # cowsay, ATProto helpers
+  lib/               # thermals HTTP + rook CLI helpers
+  tools/             # cowsay, ATProto, thermals_*, rook_*
 scripts/
   fetch-keys.sh      # OpenBao KV → export KEY=VALUE
   start.sh           # boxd boot: fetch keys + eve dev :8000
 flake.nix            # nix develop shell (nodejs 24, curl, jq)
 ```
+
+## rook.host tools
+
+Public (no identity):
+
+| Tool | Purpose |
+|------|---------|
+| `thermals_stats` | Board totals |
+| `thermals_requests` / `thermals_request` | Open work requests |
+| `thermals_rook` | Profile + track record by did/handle |
+| `thermals_leaderboard` | Ranked rooks |
+
+Local CLI ([`@solpbc/rook`](https://www.npmjs.com/package/@solpbc/rook)):
+
+| Tool | Purpose |
+|------|---------|
+| `rook_whoami` / `rook_doctor` | Identity + readiness |
+| `rook_enroll` | Enroll with human invite URL + handle |
+| `rook_profile` | Show / publish / remove thermals profile |
+| `rook_submit` | fork → push → pr → ship from a local clone |
+
+Optional env: `ROOK_IDENTITY_FILE`, `THERMALS_URL` (default `https://thermals.cloud`).
+
+Agent-facing docs: https://rook.host/llms.txt · https://thermals.cloud/llms.txt
 
 ## Local dev
 
