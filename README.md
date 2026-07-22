@@ -5,8 +5,8 @@
 - **Model**: OpenCode Zen `deepseek-v4-flash-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + IRC via **irc-bridge** (POST `/irc/inbound` + SSE `/irc/out`)
 - **AV (optional)**: **av-bridge** (Rust) — freeq MoQ media plane + internet radio (`av-bridge/`, freeq `eve-av-bridge`)
-- **Tools**: cowsay, ATProto, rook/thermals, Anna, `guess_emotion`, **`play_radio` / `stop_radio`** (stream to freeq AV)
-- **Skills**: `vit`, `vit-request-watch`, `anna`, `freeq-irc`, `irc-backlog`, `embody-emotion`, **`freeq-radio`**
+- **Tools**: cowsay, ATProto, rook/thermals, Anna, Linear (eve project), `guess_emotion`, **`play_radio` / `stop_radio`** (stream to freeq AV), **`memory_bank_add` / `memory_bank_list`** (durable song/note list)
+- **Skills**: `vit`, `vit-request-watch`, `anna`, `linear`, `freeq-irc`, `irc-backlog`, `embody-emotion`, **`freeq-radio`**
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 
@@ -20,8 +20,9 @@ agent/
   lib/ tools/ skills/ schedules/
 irc-bridge/
   server.mjs         # freeq IRC → POST /irc/inbound ; SSE /irc/out → PRIVMSG
+systemd/user/        # user unit templates (eve, irc-bridge, optional av-bridge + streamplace plane (:8792))
 scripts/
-  fetch-keys.sh, start.sh, sync-freeq-session.mjs
+  prep.sh, start.sh, install-systemd.sh, fetch-keys.sh, sync-freeq-session.mjs
 flake.nix
 ```
 
@@ -76,6 +77,41 @@ bash scripts/install-annas-mcp.sh   # → ~/.local/bin/annas-mcp
 
 Skill: `load_skill` → `anna`.
 
+## Linear tools (eve project)
+
+All Linear tools are **scoped to the Linear project named `eve`** (override with `LINEAR_PROJECT_NAME` or `LINEAR_PROJECT_ID`). Issues outside that project are rejected.
+
+| Tool | Purpose |
+|------|---------|
+| **`linear_status`** | Project progress + counts by state + sample open issues |
+| **`linear_issues`** | List/filter issues (query, state, assignee); default open only |
+| **`linear_issue`** | Full detail for one identifier/UUID |
+| `linear_create_issue` | Create issue always on the eve project |
+| `linear_update_issue` | Update title/description/priority/state/assignee (eve only) |
+
+| Variable | Notes |
+|----------|--------|
+| `LINEAR_API_KEY` | OpenBao `ai-api-keys` personal API key |
+| `LINEAR_PROJECT_NAME` | Default `eve` |
+| `LINEAR_PROJECT_ID` | Optional UUID (skips name lookup) |
+
+Skill: `load_skill` → `linear`.
+
+## Memory bank (saved songs / notes)
+
+Host file (not the sandbox). IRC: “add song to memory bank”, “read the memory bank”.
+
+| Tool | Purpose |
+|------|---------|
+| **`memory_bank_add`** | Append one entry (usually current `now playing` / `radio_title`) |
+| **`memory_bank_list`** | List saved entries |
+
+| Variable | Default |
+|----------|---------|
+| `MEMORY_BANK_PATH` | `$HOME/memory-bank.txt` |
+
+Never claim a save without a tool result. Skill: `freeq-radio`.
+
 ## freeq IRC nick / SASL
 
 If the bot appears as `Guest…` or logs `SASL failed (904)`, the freeq OAuth session expired.
@@ -87,7 +123,7 @@ node scripts/sync-freeq-session.mjs   # or /home/boxd/my-agent/scripts/…
 # restart agent (start.sh)
 ```
 
-Skill: `load_skill` → `freeq-irc`. Target nick: `eve` / `eve.rookery.boxd.sh`.
+Skill: `load_skill` → `freeq-irc`. Target nick: `eve` / handle `eve.boxd.sh` (PDS `https://pds.eve.boxd.sh`).
 
 ## Local dev
 
@@ -100,23 +136,29 @@ npm run dev
 
 ## Boxd (eve.boxd.sh)
 
-On the VM, secrets come from OpenBao:
+On the VM, secrets come from OpenBao. **Production path uses systemd user units**
+(`eve`, `eve-irc-bridge`, optional `eve-av-bridge`) — see [`systemd/README.md`](systemd/README.md).
 
 ```bash
 export OPENBAO_ADDR=https://openbao.boxd.sh
 export OPENBAO_TOKEN=…      # boxd secret / service token
 npm install
-npm run boxd:start          # scripts/start.sh
+bash scripts/install-systemd.sh   # once (writes units + ~/.config/eve/)
+# put OPENBAO_* in ~/.config/eve/openbao.env (mode 0600)
+loginctl enable-linger "$USER"    # once, if units should survive logout
+npm run boxd:start                # systemctl --user start eve.target
 ```
 
-Optional IRC env (defaults match freeq):
+Legacy (no units): `bash scripts/start.sh --legacy` (prep + nohup bridge + foreground eve).
+
+Optional IRC env (defaults match freeq; set in `~/.config/eve/config.env` for units):
 
 | Variable | Default |
 |----------|---------|
 | `IRC_HOST` | `irc.freeq.at` |
 | `IRC_PORT` | `6697` |
 | `IRC_TLS` | `1` |
-| `IRC_NICK` | `eve-agent` |
+| `IRC_NICK` | `eve` |
 | `IRC_CHANNEL` | `#test` |
 | `IRC_PASSWORD` | (unset) |
 | `IRC_OWNERS` | (unset) |

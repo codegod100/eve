@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetch AI API keys from OpenBao KV v2 and emit `export KEY=VALUE` lines on stdout.
-# Sourced by start.sh. Requires OPENBAO_ADDR and OPENBAO_TOKEN in the env.
+# Used by scripts/prep.sh (and legacy start). Requires OPENBAO_ADDR + OPENBAO_TOKEN.
 set -euo pipefail
 
 # boxd exec runs with a minimal PATH; ensure core utils are findable.

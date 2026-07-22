@@ -16,12 +16,12 @@ description: >-
 | Nick `Guest…` or host `freeq/guest` | SASL `ATPROTO-CHALLENGE` failed; freeq force-renames unauthenticated clients off reserved DID nicks |
 | Log: `SASL failed (904)` | Freeq session OAuth token invalid/expired |
 | Log: `Invalid OAuth access token` on getSession | Same — freeq `*.session.json` is stale |
-| Wanted nick `eve` but not authenticated as `did:plc:76szbe2ywgwb7vzuingj4fhq` | Session missing or not loaded |
+| Wanted nick `eve` but not authenticated as `did:plc:fdiivi2izdgx3rl2d4qedt7n` | Session missing or not loaded |
 
 Correct state after fix:
 
 ```text
-[irc-bridge] SASL success as did:plc:76szbe2ywgwb7vzuingj4fhq
+[irc-bridge] SASL success as did:plc:fdiivi2izdgx3rl2d4qedt7n
 [irc-bridge] welcome 001 nick=eve preferred=eve sasl=ok
 [irc-bridge] joined #test as eve
 ```
@@ -34,9 +34,9 @@ reclaims that nick after SASL if freeq force-renamed us, refuses to stay as
 
 | Field | Value |
 |-------|--------|
-| Handle | `eve.rookery.boxd.sh` |
-| DID | `did:plc:76szbe2ywgwb7vzuingj4fhq` |
-| PDS | `https://rookery.boxd.sh` |
+| Handle | `eve.boxd.sh` |
+| DID | `did:plc:fdiivi2izdgx3rl2d4qedt7n` |
+| PDS | `https://pds.eve.boxd.sh` (rookery unit on eve) |
 | IRC nick | `eve` (`IRC_NICK`) |
 | Channel | `#test` (`IRC_CHANNEL`) |
 | Host | `irc.freeq.at:6697` TLS |
@@ -47,20 +47,22 @@ reclaims that nick after SASL if freeq force-renamed us, refuses to stay as
 |------|------|
 | `~/.config/rook/identity.json` | Rook identity (DID, handle, keys) |
 | `~/.config/rook/identity.session.json` | Headless OAuth session (refreshable via `rook login`) |
-| `~/.config/freeq-tui/eve.rookery.boxd.sh.session.json` | **Primary** freeq SASL session (`IRC_FREEQ_SESSION`) |
-| `~/.config/freeq/eve.rookery.boxd.sh.session.json` | Fallback freeq session path |
+| `~/.config/freeq-tui/eve.boxd.sh.session.json` | **Primary** freeq SASL session (`IRC_FREEQ_SESSION`) |
+| `~/.config/freeq/eve.boxd.sh.session.json` | Fallback freeq session path |
 | `~/.config/freeq/eve.session.json` | Older fallback |
-| `/home/boxd/start.sh` | Boot: OpenBao keys + IRC env + `eve dev` |
-| `/home/boxd/my-agent/agent/channels/irc.ts` | IRC client (loads freeq session, SASL pds-oauth) |
+| `/home/boxd/rookery` + `rookery.service` | Single-user PDS (`pds.eve.boxd.sh:8787`) |
+| `/home/boxd/my-agent/scripts/prep.sh` | Prep oneshot (OpenBao keys, freeq session, build) |
+| `~/.config/systemd/user/eve*.service` | User units for agent + IRC bridge (+ optional AV) |
+| `/home/boxd/my-agent/agent/channels/irc.ts` | IRC channel wiring (HTTP inbound only; socket is bridge) |
 
 Freeq session JSON shape:
 
 ```json
 {
   "did": "did:plc:…",
-  "handle": "eve.rookery.boxd.sh",
+  "handle": "eve.boxd.sh",
   "access_token": "rkat_…",
-  "pds_url": "https://rookery.boxd.sh",
+  "pds_url": "https://pds.eve.boxd.sh",
   "dpop_key": "<JWK d / 32-byte P-256 scalar base64url>",
   "dpop_nonce": null
 }
@@ -96,11 +98,16 @@ If the script is missing, equivalent logic: read `identity.session.json` → tak
 IRC sockets live in `irc-bridge/server.mjs`, not in the eve process.
 
 ```bash
-# restart bridge only (keeps eve up):
-# kill node irc-bridge/server.mjs by pid, then:
+# preferred: systemd user unit (keeps eve up)
+systemctl --user restart eve-irc-bridge.service
+journalctl --user -u eve-irc-bridge.service -n 30 --no-pager
+
+# full stack refresh (prep + eve + bridge):
+systemctl --user start eve-prep.service
+systemctl --user restart eve.service eve-irc-bridge.service
+
+# legacy (no units): kill old bridge pid if any, then:
 EVE_URL=http://127.0.0.1:8000 nohup node irc-bridge/server.mjs >> /tmp/irc-bridge.log 2>&1 &
-# or full boot:
-nohup /home/boxd/start.sh > /tmp/eve-start.log 2>&1 &
 grep -E 'SASL success|joined |SASL failed|SSE' /tmp/irc-bridge.log | tail -10
 ```
 
@@ -122,9 +129,9 @@ boxd exec eve -- bash -lc 'npx --yes @solpbc/rook login && node /home/boxd/my-ag
 
 ## Prevention
 
-- Access tokens expire ~hours. On boot, `start.sh` should run `rook login` + `sync-freeq-session.mjs` before `eve start` / irc-bridge (if not already wired, do it when fixing nick again).
-- After **hibernate → wake**, TCP to freeq is often half-dead: restart the bridge even if tokens are still valid.
-- Keep `openbao` reachable if keys come from OpenBao at start.
+- Access tokens expire ~hours. On boot, `eve-prep.service` / `scripts/prep.sh` runs `rook login` + `sync-freeq-session.mjs` before agent and bridge.
+- After **hibernate → wake**, TCP to freeq is often half-dead: `systemctl --user restart eve-irc-bridge.service` even if tokens are still valid.
+- Keep `openbao` reachable if keys come from OpenBao at prep (`~/.config/eve/openbao.env`).
 - `IRC_REQUIRE_AUTH` defaults on for freeq hosts: bridge will not sit in `#test` as `Guest*`; it reconnects until SASL lands `eve`.
 
 ## Related

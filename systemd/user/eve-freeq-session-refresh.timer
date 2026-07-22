@@ -1,0 +1,14 @@
+[Unit]
+Description=Keep freeq SASL session fresh for eve IRC bridge
+Documentation=file://@ROOT@/systemd/README.md
+
+[Timer]
+# Soon after boot / login, then every 5 minutes (access tokens are short-lived).
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=eve-freeq-session-refresh.service
+
+[Install]
+WantedBy=timers.target

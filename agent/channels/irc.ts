@@ -67,6 +67,28 @@ function isHookConflict(msg: string): boolean {
   return /already in use|HookConflict/i.test(msg);
 }
 
+/**
+ * Keep only safe background context for SendPayload.context.
+ *
+ * eve turns each context string into a role:user message. Accept a single
+ * framed <irc_channel_context> blob from the bridge; drop unframed multi-line
+ * dumps that models would treat as open user turns.
+ */
+function sanitizeIrcContext(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const framed = raw
+    .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    .map((s) => s.trim())
+    .filter(
+      (s) =>
+        s.includes("<irc_channel_context") &&
+        s.includes("</irc_channel_context>"),
+    );
+  if (framed.length === 0) return undefined;
+  // One blob max — extra entries would each become another role:user turn.
+  return [framed[0]!];
+}
+
 const IRC_CHANNEL = process.env.IRC_CHANNEL ?? "#test";
 
 export type IrcReceiveTarget = {
@@ -104,25 +126,45 @@ export default defineChannel<IrcState, { state: IrcState }, IrcReceiveTarget>({
         from: string;
         target: string;
         text: string;
+        /**
+         * Optional background scrollback from the bridge. eve injects each
+         * string as role:user before the delivery message — so the bridge
+         * must send a single framed <irc_channel_context> blob, never raw
+         * per-line history that looks like open requests.
+         */
+        context?: string[];
       };
       try {
-        // Delivery message = the mention only (prefixed with speaker nick so
-        // the model knows who to address). Do NOT pass SendPayload.context:
-        // eve injects those as role:user history and models answer every line
-        // (old mentions, rejoin scrollback, etc.).
         const nick = String(body.from ?? "").trim() || "someone";
-        await send(`<${nick}> ${body.text}`, {
-          auth: {
-            authenticator: "irc",
-            principalType: "user",
-            principalId: body.from,
-            attributes: { target: body.target },
+        // Only accept already-framed background blobs (defense in depth).
+        const context = sanitizeIrcContext(body.context);
+        // Delivery = the current mention only. Prefix makes the speaker nick
+        // and "answer only this" rule explicit next to any background block.
+        const message = [
+          `Current IRC mention from <${nick}> in ${body.target || "DM"}.`,
+          `Answer ONLY this message (one IRC line, address ${nick}).`,
+          `Do not reply to or re-act on any <irc_channel_context> block above.`,
+          ``,
+          `<${nick}> ${body.text}`,
+        ].join("\n");
+        await send(
+          {
+            message,
+            ...(context?.length ? { context } : {}),
           },
-          // Per-message token so a stuck prior turn does not block the next.
-          continuationToken: `${body.from}:${Date.now()}`,
-          state: { from: body.from, target: body.target },
-          title: `irc: ${body.from}`,
-        });
+          {
+            auth: {
+              authenticator: "irc",
+              principalType: "user",
+              principalId: body.from,
+              attributes: { target: body.target },
+            },
+            // Per-message token so a stuck prior turn does not block the next.
+            continuationToken: `${body.from}:${Date.now()}`,
+            state: { from: body.from, target: body.target },
+            title: `irc: ${body.from}`,
+          },
+        );
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const target = body.target || IRC_CHANNEL;

@@ -1,0 +1,20 @@
+[Unit]
+Description=eve AV bridge (freeq MoQ media plane / radio)
+Documentation=file://@ROOT@/systemd/README.md
+After=network-online.target
+# Optional sidecar — not required by eve.target by default; enable explicitly.
+PartOf=eve.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/eve/runtime.env
+EnvironmentFile=-%h/.config/eve/config.env
+ExecStart=@ROOT@/scripts/run-av-bridge-service.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=eve.target

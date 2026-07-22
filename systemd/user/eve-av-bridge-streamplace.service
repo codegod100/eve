@@ -1,0 +1,23 @@
+[Unit]
+Description=eve AV bridge (stream.place → freeq MoQ media plane)
+Documentation=file://@ROOT@/systemd/README.md
+After=network-online.target eve-av-bridge.service
+PartOf=eve.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=STREAMPLACE_AV_BRIDGE_BIND=127.0.0.1:8792
+Environment=AV_BRIDGE_BIND=127.0.0.1:8792
+Environment=RADIO_TITLE_HOOK=
+Environment=AV_INCLUDE_VIDEO=1
+EnvironmentFile=-%h/.config/eve/runtime.env
+EnvironmentFile=-%h/.config/eve/config.env
+ExecStart=@ROOT@/scripts/run-av-bridge-streamplace.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=eve.target

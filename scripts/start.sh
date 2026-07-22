@@ -1,68 +1,72 @@
 #!/usr/bin/env bash
-# Boot: OpenBao keys → freeq session → eve start → irc-bridge (background).
+# Boot the eve stack.
+#
+# Prefer systemd user units when installed (eve.target). Otherwise fall back
+# to a legacy foreground path (prep + background irc-bridge + eve).
+#
+#   npm run boxd:start
+#   bash scripts/start.sh
+#   bash scripts/start.sh --legacy    # force non-systemd path
+#   bash scripts/start.sh --install   # install units then start
 set -euo pipefail
 
-export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "[start] fetching keys from ${OPENBAO_ADDR:-<unset>} ..."
-# shellcheck disable=SC1090
-eval "$(bash "$ROOT/scripts/fetch-keys.sh")"
-echo "[start] injected keys: $(env | grep -cE '^(FUGU|META|OLLAMA|OPENCODE|OPENROUTER|UMANS|ANNA)_API_KEY=' || true)"
-if [ -n "${ANNA_API_KEY:-}" ]; then
-  echo "[start] ANNA_API_KEY present (Anna's Archive member JSON API)"
-else
-  echo "[start] ANNA_API_KEY missing — anna_download / anna_fast_download need a key"
-fi
-export ANNA_DOWNLOAD_DIR="${ANNA_DOWNLOAD_DIR:-$HOME/archive}"
-mkdir -p "$ANNA_DOWNLOAD_DIR"
-echo "[start] ANNA_DOWNLOAD_DIR=$ANNA_DOWNLOAD_DIR"
+LEGACY=0
+INSTALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --legacy) LEGACY=1 ;;
+    --install) INSTALL=1 ;;
+    -h | --help)
+      sed -n '2,12p' "$0"
+      exit 0
+      ;;
+  esac
+done
 
-export OPENCODE_MODEL="${OPENCODE_MODEL:-deepseek-v4-flash-free}"
+units_installed() {
+  systemctl --user cat eve.target >/dev/null 2>&1
+}
 
-export IRC_HOST="${IRC_HOST:-irc.freeq.at}"
-export IRC_PORT="${IRC_PORT:-6697}"
-export IRC_TLS="${IRC_TLS:-1}"
-export IRC_NICK="${IRC_NICK:-eve}"
-export IRC_CHANNEL="${IRC_CHANNEL:-#test}"
-export IRC_FREEQ_SESSION="${IRC_FREEQ_SESSION:-$HOME/.config/freeq-tui/eve.rookery.boxd.sh.session.json}"
-export EVE_URL="${EVE_URL:-http://127.0.0.1:8000}"
-export IRC_BACKLOG_MIN_MS="${IRC_BACKLOG_MIN_MS:-3000}"
-export IRC_BACKLOG_GAP_MS="${IRC_BACKLOG_GAP_MS:-2000}"
-export IRC_BACKLOG_MAX_MS="${IRC_BACKLOG_MAX_MS:-30000}"
-
-echo "[start] model: ${OPENCODE_MODEL}"
-echo "[start] irc: ${IRC_NICK}@${IRC_HOST} → ${IRC_CHANNEL} via bridge → ${EVE_URL}"
-
-if command -v npx >/dev/null 2>&1; then
-  echo "[start] rook login ..."
-  npx --yes @solpbc/rook login || echo "[start] warning: rook login failed"
-fi
-if [ -f "$ROOT/scripts/sync-freeq-session.mjs" ]; then
-  echo "[start] sync freeq session ..."
-  node "$ROOT/scripts/sync-freeq-session.mjs" || echo "[start] warning: freeq session sync failed"
+if [ "$INSTALL" -eq 1 ]; then
+  bash "$ROOT/scripts/install-systemd.sh"
 fi
 
-# annas-mcp for anna_search (ISBN/title → MD5)
-if [ ! -x "${ANNAS_MCP_BIN:-$HOME/.local/bin/annas-mcp}" ]; then
-  echo "[start] installing annas-mcp CLI ..."
-  bash "$ROOT/scripts/install-annas-mcp.sh" || echo "[start] warning: annas-mcp install failed"
-fi
-export PATH="$HOME/.local/bin:$PATH"
-if command -v annas-mcp >/dev/null 2>&1; then
-  echo "[start] annas-mcp: $(command -v annas-mcp)"
-else
-  echo "[start] annas-mcp missing — anna_search will fail until install-annas-mcp.sh succeeds"
+if [ "$LEGACY" -eq 0 ] && units_installed; then
+  echo "[start] systemd: starting eve.target"
+  # Refresh secrets/build before (re)starting long-running units.
+  systemctl --user start eve-prep.service
+  systemctl --user restart eve.service eve-irc-bridge.service
+  if systemctl --user is-enabled eve-av-bridge.service >/dev/null 2>&1; then
+    systemctl --user restart eve-av-bridge.service || true
+  fi
+  systemctl --user start eve.target
+  systemctl --user --no-pager --full status eve.service eve-irc-bridge.service || true
+  echo "[start] logs: journalctl --user -u eve.service -u eve-irc-bridge.service -f"
+  exit 0
 fi
 
-echo "[start] building eve ..."
-npx eve build
+if [ "$LEGACY" -eq 0 ] && ! units_installed; then
+  echo "[start] systemd units not installed — legacy path"
+  echo "[start] install with:  bash scripts/install-systemd.sh"
+fi
 
-# IRC bridge (background). Waits for eve HTTP, then joins freeq.
-echo "[start] launching irc-bridge ..."
-nohup node "$ROOT/irc-bridge/server.mjs" >> /tmp/irc-bridge.log 2>&1 &
+# --- Legacy: prep + nohup bridge + foreground eve ---------------------------
+bash "$ROOT/scripts/prep.sh"
+RUNTIME_ENV="${EVE_RUNTIME_ENV:-$HOME/.config/eve/runtime.env}"
+if [ -f "$RUNTIME_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$RUNTIME_ENV"
+  set +a
+fi
+
+echo "[start] launching irc-bridge (legacy background) ..."
+nohup node "$ROOT/irc-bridge/server.mjs" >>/tmp/irc-bridge.log 2>&1 &
 echo "[start] irc-bridge pid $! (log /tmp/irc-bridge.log)"
 
 echo "[start] launching eve start on :8000 ..."

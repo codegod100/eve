@@ -8,15 +8,17 @@ irc.freeq.at  ←TLS→  irc-bridge  ──POST /irc/inbound──►  eve :8000
 ```
 
 1. Channel PRIVMSGs after JOIN are ignored until the join backlog ends
-   (`IRC_BACKLOG_*` min/gap/max).
+   (`IRC_BACKLOG_*` min/gap/max). Live lines after that go into a per-target
+   ring buffer (`IRC_CONTEXT_LINES`, default 40).
 2. A live mention → bridge immediately 👀-reacts (TAGMSG `+react` /
-   `+reply=<msgid>`), then `POST`s `{from,target,text,msgid}` to eve.
-   **No scrollback** is attached — eve's `SendPayload.context` becomes
-   `role:user` history and models answer every historical line, so we send
-   only the mention body.
-3. Eve runs the agent turn on that single message.
+   `+reply=<msgid>`), then `POST`s `{from,target,text,msgid,context}` to eve.
+   `context` is **one framed** `<irc_channel_context>` blob (background only),
+   not raw per-line history — eve injects context as `role:user`, so framing
+   + instructions tell the model not to answer scrollback.
+3. Eve runs the agent turn: background blob (if any) + current mention only.
 4. On `message.completed`, eve pushes an SSE `privmsg` event.
-5. Bridge reads SSE and sends `PRIVMSG` on IRC.
+5. Bridge reads SSE and sends `PRIVMSG` on IRC (and records own replies in
+   the ring buffer).
 
 ## Run
 
@@ -39,11 +41,15 @@ node irc-bridge/server.mjs
 | `IRC_FREEQ_SESSION` | freeq-tui session JSON |
 | `IRC_REQUIRE_AUTH` | auto-on for freeq hosts; refuse `Guest*` / reconnect until SASL nick is `IRC_NICK` |
 | `IRC_BACKLOG_*` | join history ignore |
+| `IRC_CONTEXT_LINES` | live ring buffer size for background context (default `40`; `0` = off) |
+| `IRC_CONTEXT_MAX_CHARS` | max framed context blob size (default `6000`) |
 | `IRC_WORKING_REACT` | emoji for “working on it” (default `👀`) |
 | `IRC_CONTROL_HOST` / `IRC_CONTROL_PORT` | control HTTP (default `127.0.0.1:8791`) |
 | `AV_BRIDGE_URL` | eve-av-bridge base (default `http://127.0.0.1:8790`) |
 | `SFU_URL` | MoQ SFU (default freeq `https://irc.freeq.at:8080/av/moq`) |
 | `FREEQ_API_BASE` | REST for session discovery (default `https://<IRC_HOST>`) |
+| `RADIO_ANNOUNCE` | `1` (default) — PRIVMSG when ICY song title changes |
+| `RADIO_ANNOUNCE_MS` | poll interval for title changes (default `2000`) |
 
 ### Control HTTP (eve tools)
 
@@ -52,5 +58,30 @@ node irc-bridge/server.mjs
 | `/av/ensure` | `{ channel?, title? }` | av_start/join + connect media |
 | `/radio/play` | `{ url, channel?, title? }` | ensure AV + stream radio |
 | `/radio/stop` | | stop decode |
+| `/radio/now-playing` | `{ title, channel? }` | announce song (from av-bridge `RADIO_TITLE_HOOK` or tooling) |
 
 Needs **eve-av-bridge** running with **ffmpeg** for radio.
+
+### Now-playing (song changes)
+
+When radio is playing, the bridge announces each new ICY `StreamTitle` as a
+single PRIVMSG on the radio channel:
+
+```
+now playing: Artist - Track
+```
+
+Two paths (deduped):
+
+1. **Push** — set `RADIO_TITLE_HOOK=http://127.0.0.1:8791/radio/now-playing` on
+   eve-av-bridge (default in `scripts/run-av-bridge.sh`).
+2. **Poll** — every `RADIO_ANNOUNCE_MS`, GET av-bridge `/v1/status` for
+   `radio.title` (works with older av-bridge builds that only expose status).
+
+
+## Channel commands
+
+| Command | Effect |
+|---------|--------|
+| `eve: watch https://stream.place/<handle>` | switch stream.place rebroadcast to that streamer |
+| `eve: watch <handle>` / `eve: watch did:plc:…` | same |

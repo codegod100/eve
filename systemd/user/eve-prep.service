@@ -1,0 +1,21 @@
+[Unit]
+Description=eve prep (OpenBao keys, freeq session, build)
+Documentation=file://@ROOT@/systemd/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@ROOT@
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Operator secrets for OpenBao (OPENBAO_ADDR, OPENBAO_TOKEN) — mode 0600.
+EnvironmentFile=-%h/.config/eve/openbao.env
+# Optional non-secret overrides (IRC_*, OPENCODE_MODEL, …).
+EnvironmentFile=-%h/.config/eve/config.env
+ExecStart=@ROOT@/scripts/prep.sh
+TimeoutStartSec=300
+
+[Install]
+WantedBy=eve.target

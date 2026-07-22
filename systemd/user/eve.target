@@ -1,0 +1,8 @@
+[Unit]
+Description=eve agent stack (prep + agent + IRC bridge; AV optional)
+Documentation=file://@ROOT@/systemd/README.md
+Wants=eve-prep.service eve.service eve-irc-bridge.service
+After=eve-prep.service
+
+[Install]
+WantedBy=default.target

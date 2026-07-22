@@ -1,0 +1,23 @@
+[Unit]
+Description=eve IRC bridge (freeq ↔ eve HTTP/SSE)
+Documentation=file://@ROOT@/systemd/README.md
+# Bridge waits for eve HTTP itself; still order after agent when possible.
+Wants=eve.service
+After=eve-prep.service eve.service
+PartOf=eve.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/eve/runtime.env
+EnvironmentFile=-%h/.config/eve/config.env
+ExecStart=@NODE@ @ROOT@/irc-bridge/server.mjs
+Restart=always
+RestartSec=3
+# After hibernate/wake, force a clean reconnect cycle.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=eve.target

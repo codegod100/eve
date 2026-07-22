@@ -1,0 +1,25 @@
+[Unit]
+Description=rookery PDS (single-user, wrangler dev / miniflare)
+Documentation=file://@ROOT@/systemd/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@HOME@/rookery
+Environment=HOME=@HOME@
+Environment=PATH=@HOME@/rookery/node_modules/.bin:@NODE_DIR@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@HOME@/rookery/node_modules/.bin/wrangler dev \
+  --ip 0.0.0.0 \
+  --port 8787 \
+  --local \
+  --persist-to @HOME@/rookery-data \
+  --show-interactive-dev-session false \
+  --log-level info
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:@HOME@/logs/rookery.log
+StandardError=append:@HOME@/logs/rookery.log
+
+[Install]
+WantedBy=default.target

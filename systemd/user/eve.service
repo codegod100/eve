@@ -1,0 +1,22 @@
+[Unit]
+Description=eve agent (HTTP :8000)
+Documentation=file://@ROOT@/systemd/README.md
+Requires=eve-prep.service
+After=eve-prep.service network-online.target
+PartOf=eve.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/eve/runtime.env
+EnvironmentFile=-%h/.config/eve/config.env
+ExecStart=@NPX@ eve start --port 8000 --host 0.0.0.0
+Restart=on-failure
+RestartSec=5
+# Give in-flight agent turns a moment to finish.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=eve.target

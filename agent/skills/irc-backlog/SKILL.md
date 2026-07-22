@@ -41,11 +41,21 @@ Logs:
 
 Set on the eve VM before `start.sh` (or export in `start.sh`).
 
-## No scrollback in the model turn
+## Background scrollback (safe context)
 
-The bridge does **not** attach channel history as `SendPayload.context`.
-eve would inject that as `role:user` messages and models answer every line
-(old mentions, rejoin flood, etc.). Inbound is the mention body only.
+After join backlog ends, the bridge keeps a per-target ring buffer of live
+PRIVMSGs and attaches **one framed** `<irc_channel_context>` blob on each
+mention via `SendPayload.context`.
+
+eve injects each context string as `role:user`, so we never send raw
+per-line history. The blob is labeled BACKGROUND ONLY; historical bot
+mentions are stored as `role=prior_mention` (not open requests). The agent
+must answer **only** the current mention delivery message.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `IRC_CONTEXT_LINES` | `40` | Ring buffer size; `0` disables context |
+| `IRC_CONTEXT_MAX_CHARS` | `6000` | Cap on the framed blob size |
 
 ## Agent behavior if a historical mention still arrives
 

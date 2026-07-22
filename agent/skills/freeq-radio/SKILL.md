@@ -2,7 +2,7 @@
 name: freeq-radio
 description: >-
   Stream internet radio into a freeq AV (voice) call when users say play radio,
-  put on music, stop radio, or name a station. Tools: play_radio, stop_radio.
+  put on music, stop radio, or name a station. Tools: play_radio, stop_radio, watch_stream.
   Needs irc-bridge control API + eve-av-bridge + ffmpeg.
 ---
 
@@ -48,3 +48,11 @@ user → eve play_radio → irc-bridge :8791 /radio/play
 
 If play fails: check av-bridge health `curl :8790/health`, control
 `curl :8791/health`, and that `ffmpeg` is on PATH.
+
+
+## stream.place (`watch`)
+
+- Channel command (instant): `eve: watch https://stream.place/handle`
+- Also: `eve: watch handle` / `eve: watch did:plc:…`
+- Tool: **`watch_stream`** for natural language ("put on iame.li stream").
+- Switches the stream.place MoQ plane (one plane at a time; replaces radio).

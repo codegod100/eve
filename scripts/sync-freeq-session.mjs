@@ -23,9 +23,9 @@ const ROOK_SESSION =
 const ROOK_IDENTITY =
   process.env.ROOK_IDENTITY_FILE ??
   path.join(HOME, ".config/rook/identity.json");
-const DEFAULT_PDS = "https://rookery.boxd.sh";
-const DEFAULT_DID = "did:plc:76szbe2ywgwb7vzuingj4fhq";
-const DEFAULT_HANDLE = "eve.rookery.boxd.sh";
+const DEFAULT_PDS = "https://pds.eve.boxd.sh";
+const DEFAULT_DID = "did:plc:fdiivi2izdgx3rl2d4qedt7n";
+const DEFAULT_HANDLE = "eve.boxd.sh";
 
 function b64url(buf) {
   return Buffer.from(buf).toString("base64url");

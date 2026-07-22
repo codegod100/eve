@@ -15,6 +15,10 @@
     "irc-bridge": "node irc-bridge/server.mjs",
     "install-annas-mcp": "bash scripts/install-annas-mcp.sh",
     "typecheck": "tsc",
+    "systemd:install": "bash scripts/install-systemd.sh",
+    "systemd:start": "systemctl --user start eve.target",
+    "systemd:stop": "systemctl --user stop eve.target",
+    "systemd:status": "systemctl --user --no-pager status eve.target eve.service eve-irc-bridge.service",
     "boxd:start": "bash scripts/start.sh"
   },
   "dependencies": {

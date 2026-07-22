@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh eve freeq SASL session (rook OAuth → freeq session files)
+Documentation=file://@ROOT@/systemd/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@ROOT@
+Environment=HOME=%h
+Environment=PATH=%h/.nvm/versions/node/v24.18.0/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/eve/runtime.env
+EnvironmentFile=-%h/.config/eve/config.env
+ExecStart=@ROOT@/scripts/refresh-freeq-session.sh
+Nice=10
+# oneshot may take a while (npx + rook login)
+TimeoutStartSec=120
