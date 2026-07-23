@@ -1666,8 +1666,10 @@ function isFreeqSessionActive(state) {
 
 /**
  * Pick the freeq AV session we should join on this channel.
- * freeq can briefly list multiple Active rows after thrash — prefer the room
- * that already has humans (non-us participants) over an eve-only ghost we just started.
+ * freeq can list multiple Active rows after thrash. Score:
+ *   1. humans (non-us) on the roster — never sit alone while nandi is elsewhere
+ *   2. channel's official `active` (what freeq clients "Join existing" uses)
+ *   3. larger rooms / first-listed
  * @returns {Promise<string | null>}
  */
 async function discoverActiveSession(channel) {
@@ -1677,28 +1679,33 @@ async function discoverActiveSession(channel) {
     const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return null;
     const json = await res.json();
+    const channelActiveId =
+      json?.active && isFreeqSessionActive(json.active.state)
+        ? typeof json.active.id === "string"
+          ? json.active.id
+          : null
+        : null;
+
     /** @type {string[]} */
     const ids = [];
     const pushId = (id) => {
       if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
     };
-    if (json?.active && isFreeqSessionActive(json.active.state)) {
-      pushId(json.active.id);
-    }
+    // Prefer scanning the official active first.
+    if (channelActiveId) pushId(channelActiveId);
     for (const r of Array.isArray(json?.recent) ? json.recent : []) {
       if (isFreeqSessionActive(r?.state)) pushId(r?.id);
     }
     if (!ids.length) return null;
 
     const me = String(irc.nick || "").toLowerCase();
-    /** @type {{ id: string, others: number, total: number }[]} */
+    /** @type {{ id: string, others: number, total: number, official: boolean, score: number }[]} */
     const scored = [];
     for (const id of ids.slice(0, 8)) {
       try {
         const data = await fetchSessionRoster(id);
-        if (!isFreeqSessionActive(data?.state) && data?.state !== undefined) {
-          // roster may omit state; treat missing as ok if listed Active above
-          if (data.state && data.state !== "Active") continue;
+        if (data?.state !== undefined && !isFreeqSessionActive(data.state)) {
+          continue;
         }
         const parts = Array.isArray(data?.participants)
           ? data.participants
@@ -1707,19 +1714,22 @@ async function discoverActiveSession(channel) {
         const others = parts.filter(
           (p) => String(p?.nick ?? "").toLowerCase() !== me,
         ).length;
-        scored.push({ id, others, total });
+        const official = id === channelActiveId;
+        // Humans dominate. Official channel active beats eve-only zombies.
+        const score = others * 1_000_000 + (official ? 10_000 : 0) + total;
+        scored.push({ id, others, total, official, score });
       } catch (e) {
         log(`discover roster ${id}: ${e instanceof Error ? e.message : e}`);
       }
     }
     if (!scored.length) {
-      return typeof json?.active?.id === "string" ? json.active.id : ids[0];
+      return channelActiveId || ids[0];
     }
-    scored.sort((a, b) => b.others - a.others || b.total - a.total);
+    scored.sort((a, b) => b.score - a.score);
     const best = scored[0];
-    if (best.others > 0) {
+    if (scored.length > 1 || best.others > 0 || best.official) {
       log(
-        `discover session: prefer ${best.id} (others=${best.others} total=${best.total}) over ${ids.length} active`,
+        `discover session: ${best.id} (others=${best.others} total=${best.total} official=${best.official}) among ${scored.length}`,
       );
     }
     return best.id;
@@ -1832,6 +1842,9 @@ async function ensureAv(
             channel: ch,
           };
           activePlanes.set(bridge, plane);
+          // Drop extra eve~* rows (e.g. leftover call-plane instance) so freeq
+          // shows one tile for this bridge.
+          await leaveGhostRosterInstances(freeqId, ch, plane.instance);
           log(
             `ensureAv: reusing ${freeqId}/${plane.nick}~${plane.instance} on ${bridge}`,
           );
@@ -2191,10 +2204,19 @@ async function playStreamplace({ channel, streamer } = {}) {
     throw new Error(json.error || `streamplace radio play ${res.status}`);
   }
 
+  // freeq clients often open a *new* voice room while eve sits on an older
+  // Active session — follow humans onto channel.active for ~30s after watch.
+  scheduleFollowHumanSession({
+    channel: ch,
+    bridgeUrl: STREAMPLACE_AV_BRIDGE_URL,
+    title: title.slice(0, 120),
+    radioUrl: picked.hls,
+  });
+
   // Optional channel notice (once per start).
   try {
     const notice =
-      `stream.place → freeq AV: ${picked.title} (@${picked.handle}, ${picked.viewers ?? "?"} watching) — join voice in ${ch.startsWith("#") ? ch : "#" + ch}`.slice(
+      `stream.place → freeq AV: ${picked.title} (@${picked.handle}, ${picked.viewers ?? "?"} watching) — open voice in ${ch.startsWith("#") ? ch : "#" + ch} (eve will join your room)`.slice(
         0,
         400,
       );
@@ -2209,6 +2231,107 @@ async function playStreamplace({ channel, streamer } = {}) {
     radio: json.radio,
     plane: STREAMPLACE_AV_BRIDGE_URL,
   };
+}
+
+/** @type {ReturnType<typeof setTimeout> | null} */
+let followHumanTimer = null;
+/** @type {number} */
+let followHumanGen = 0;
+
+/**
+ * If a human opens a different freeq room on this channel, move this bridge
+ * (and re-start radio URL) so their UI sees eve's tile.
+ * @param {{ channel: string, bridgeUrl: string, title?: string, radioUrl?: string }} opts
+ */
+function scheduleFollowHumanSession(opts) {
+  if (followHumanTimer) {
+    clearTimeout(followHumanTimer);
+    followHumanTimer = null;
+  }
+  const gen = ++followHumanGen;
+  let attempts = 0;
+  const tick = () => {
+    void (async () => {
+      if (gen !== followHumanGen) return;
+      attempts += 1;
+      try {
+        const moved = await tryFollowHumanSession(opts);
+        if (moved) {
+          log(
+            `follow human session: migrated plane ${opts.bridgeUrl} → human room`,
+          );
+          return;
+        }
+      } catch (e) {
+        log(`follow human session: ${e instanceof Error ? e.message : e}`);
+      }
+      if (gen !== followHumanGen) return;
+      if (attempts < 15) {
+        followHumanTimer = setTimeout(tick, 2_000);
+        followHumanTimer.unref?.();
+      }
+    })();
+  };
+  followHumanTimer = setTimeout(tick, 1_500);
+  followHumanTimer.unref?.();
+}
+
+/**
+ * @param {{ channel: string, bridgeUrl: string, title?: string, radioUrl?: string }} opts
+ * @returns {Promise<boolean>} true if we migrated
+ */
+async function tryFollowHumanSession({ channel, bridgeUrl, title, radioUrl }) {
+  const ch = channel.startsWith("#") ? channel : `#${channel}`;
+  const bridge = planeKey(bridgeUrl);
+  const preferred = await discoverActiveSession(ch);
+  if (!preferred) return false;
+
+  let current = activePlanes.get(bridge)?.sessionId ?? null;
+  if (!current) {
+    try {
+      const st = await fetch(`${bridge}/v1/status`, {
+        signal: AbortSignal.timeout(3_000),
+      }).then((r) => r.json());
+      current = st?.session?.session_id ?? null;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (current && current === preferred) return false;
+
+  // Only move when the preferred room has a non-us participant.
+  try {
+    const roster = await fetchSessionRoster(preferred);
+    const parts = Array.isArray(roster?.participants)
+      ? roster.participants
+      : [];
+    const me = String(irc.nick || "").toLowerCase();
+    const others = parts.filter(
+      (p) => String(p?.nick ?? "").toLowerCase() !== me,
+    ).length;
+    if (others === 0) return false;
+  } catch (e) {
+    log(`follow roster: ${e instanceof Error ? e.message : e}`);
+    return false;
+  }
+
+  log(
+    `follow human session: ${current ?? "?"} → ${preferred} on ${bridge} (others present)`,
+  );
+  await ensureAv(ch, title || "stream.place", bridge, { force: true });
+  if (radioUrl) {
+    const res = await fetch(`${bridge}/v1/radio/play`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: radioUrl }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json.ok === false) {
+      throw new Error(json.error || `follow radio play HTTP ${res.status}`);
+    }
+  }
+  return true;
 }
 
 async function stopStreamplace() {
