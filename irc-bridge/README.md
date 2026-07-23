@@ -52,10 +52,14 @@ node irc-bridge/server.mjs
 | `RADIO_ANNOUNCE_MS` | poll interval for title changes (default `2000`) |
 | `STREAMPLACE_AV_BRIDGE_URL` | watch plane av-bridge (default `http://127.0.0.1:8792`) |
 | `STREAMPLACE_API` | stream.place XRPC base (default `https://stream.place`) |
-| `STREAMPLACE_AUTO` | `1` = restore/watch on boot |
+| `STREAMPLACE_AUTO` | `1` = restore last saved `watch` on boot (no pref → idle; never invents top-live) |
 | `STREAMPLACE_RTMP_URL` | publish ingest base (default `rtmps://stream.place:1935/live`) |
 | `STREAMPLACE_STREAM_KEY` | required for **publish** (from stream.place dashboard) |
 | `STREAMPLACE_PUBLISH_HANDLE` | optional public handle for go-live notices |
+
+**Planes**: radio/call (`:8790`) and stream.place watch (`:8792`) are independent.
+`ensureAv` only leaves/reconnects the bridge you asked for — watch and call no longer
+kick each other off freeq. Both prefer the channel’s existing active session.
 
 ### Control HTTP (eve tools)
 

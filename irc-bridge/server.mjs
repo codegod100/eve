@@ -89,7 +89,9 @@ const STREAMPLACE_RTMP_URL = (
   process.env.STREAMPLACE_RTMP_URL ?? "rtmps://stream.place:1935/live"
 ).replace(/\/$/, "");
 /** Required to publish. Prefer ~/.config/eve/config.env (mode 0600). */
-const STREAMPLACE_STREAM_KEY = (process.env.STREAMPLACE_STREAM_KEY ?? "").trim();
+const STREAMPLACE_STREAM_KEY = (
+  process.env.STREAMPLACE_STREAM_KEY ?? ""
+).trim();
 /** Public page for notices, e.g. eve.boxd.sh or did:plc:… */
 const STREAMPLACE_PUBLISH_HANDLE = (
   process.env.STREAMPLACE_PUBLISH_HANDLE ?? ""
@@ -122,7 +124,8 @@ function loadStreamplacePref() {
 
 function saveStreamplacePref(streamer, channel) {
   try {
-    const id = parseStreamplaceTarget(streamer) || String(streamer || "").trim();
+    const id =
+      parseStreamplaceTarget(streamer) || String(streamer || "").trim();
     if (!id) return;
     fs.mkdirSync(path.dirname(STREAMPLACE_PREF_PATH), { recursive: true });
     fs.writeFileSync(
@@ -146,7 +149,8 @@ function saveStreamplacePref(streamer, channel) {
 
 function clearStreamplacePref() {
   try {
-    if (fs.existsSync(STREAMPLACE_PREF_PATH)) fs.unlinkSync(STREAMPLACE_PREF_PATH);
+    if (fs.existsSync(STREAMPLACE_PREF_PATH))
+      fs.unlinkSync(STREAMPLACE_PREF_PATH);
     log("streamplace pref cleared");
   } catch (e) {
     log(`streamplace pref clear: ${e instanceof Error ? e.message : e}`);
@@ -1520,26 +1524,49 @@ process.on("SIGINT", () => {
 // ---------------------------------------------------------------------------
 // AV ensure + radio (orchestrates TAGMSG + eve-av-bridge)
 // ---------------------------------------------------------------------------
-// freeq AV allows multiple MoQ publishers, but eve only keeps ONE media plane
-// attached at a time (radio :8790 vs stream.place :8792, or reconnects).
-// Switching planes: av-leave previous roster entry + disconnect the old bridge.
+// freeq allows multiple MoQ publishers. We keep up to one attachment *per bridge*:
+//   :8790 radio / call-egress    :8792 stream.place watch
+// Planes must not tear each other down — that was the session thrash (av-leave
+// the other plane → ghost sessions → humans alone while eve sits on a dead room).
 
-/** @type {{ bridgeUrl: string, sessionId: string, instance: string, nick: string, channel: string } | null} */
-let activePlane = null;
+/**
+ * @typedef {{ bridgeUrl: string, sessionId: string, instance: string, nick: string, channel: string }} AvPlane
+ * @type {Map<string, AvPlane>}
+ */
+const activePlanes = new Map();
+
+function planeKey(url) {
+  return String(url ?? "").replace(/\/$/, "");
+}
 
 function knownPlaneUrls() {
   return [
     ...new Set(
-      [AV_BRIDGE_URL, STREAMPLACE_AV_BRIDGE_URL].map((u) =>
-        String(u).replace(/\/$/, ""),
-      ),
+      [AV_BRIDGE_URL, STREAMPLACE_AV_BRIDGE_URL].map((u) => planeKey(u)),
     ),
   ];
 }
 
-/** Stop radio + MoQ on a bridge (best-effort). */
+/** Snapshot for /health (object keyed by bridge URL). */
+function activePlanesSnapshot() {
+  /** @type {Record<string, AvPlane>} */
+  const out = {};
+  for (const [k, v] of activePlanes) out[k] = v;
+  return out;
+}
+
+/** Instances we currently intend to keep on freeq (any bridge). */
+function trackedInstances() {
+  const keep = new Set();
+  for (const p of activePlanes.values()) {
+    if (p?.instance) keep.add(p.instance);
+  }
+  return keep;
+}
+
+/** Stop radio + MoQ on a bridge (best-effort). Does not av-leave freeq. */
 async function stopBridgeMedia(bridgeUrl) {
-  const bridge = String(bridgeUrl).replace(/\/$/, "");
+  const bridge = planeKey(bridgeUrl);
   try {
     await fetch(`${bridge}/v1/radio/stop`, {
       method: "POST",
@@ -1559,70 +1586,68 @@ async function stopBridgeMedia(bridgeUrl) {
 }
 
 /**
- * Release prior MoQ plane(s) so only one can publish into a freeq session.
- * @param {string | null} keepBridge bridge that will reconnect (radio stop only);
- *        null = disconnect every known plane.
+ * Release one MoQ plane: av-leave its freeq instance + stop that bridge only.
+ * Other bridges stay attached.
+ * @param {string} bridgeUrl
  */
-async function releasePlanes(keepBridge = null) {
-  const keep = keepBridge ? String(keepBridge).replace(/\/$/, "") : null;
-  const prev = activePlane;
-  activePlane = null;
+async function releasePlane(bridgeUrl) {
+  const key = planeKey(bridgeUrl);
+  const prev = activePlanes.get(key) ?? null;
+  activePlanes.delete(key);
 
   if (prev?.sessionId && prev?.instance && prev?.channel) {
     try {
       irc.avLeave(prev.channel, prev.sessionId, prev.instance);
       log(
-        `av leave ${prev.sessionId}/${prev.nick ?? "?"}~${prev.instance} on ${prev.channel} (single-plane)`,
+        `av leave ${prev.sessionId}/${prev.nick ?? "?"}~${prev.instance} on ${prev.channel} (plane ${key})`,
       );
     } catch (e) {
       log(`av leave: ${e instanceof Error ? e.message : e}`);
     }
   }
 
-  for (const url of knownPlaneUrls()) {
-    if (keep && url === keep) {
-      // Same bridge: drop radio so play paths don't stack; MoQ replaced on connect.
-      try {
-        await fetch(`${url}/v1/radio/stop`, {
-          method: "POST",
-          signal: AbortSignal.timeout(5_000),
-        });
-      } catch (e) {
-        log(`plane radio stop ${url}: ${e instanceof Error ? e.message : e}`);
-      }
-      continue;
-    }
-    log(`releasing other plane ${url}`);
-    await stopBridgeMedia(url);
+  log(`releasing plane ${key}`);
+  await stopBridgeMedia(key);
+}
+
+/** Tear down every known plane (explicit stop-all / shutdown). */
+async function releaseAllPlanes() {
+  const urls = new Set([...knownPlaneUrls(), ...activePlanes.keys()]);
+  for (const url of urls) {
+    await releasePlane(url);
   }
 }
 
 /**
- * av-leave every freeq roster row for our nick in this session (except keepInstance).
- * Clears multi-plane ghosts after crash/restart when activePlane was untracked.
+ * av-leave ghost roster rows for our nick that no plane is tracking.
+ * Never touches instances still held by another bridge.
+ * @param {string} sessionId
+ * @param {string} channel
+ * @param {string | null} [alsoKeep] extra instance to preserve (e.g. about to connect)
  */
-async function leaveOurRosterInstances(sessionId, channel, keepInstance = null) {
+async function leaveGhostRosterInstances(sessionId, channel, alsoKeep = null) {
   if (!sessionId) return;
   const ch = channel.startsWith("#") ? channel : `#${channel}`;
+  const keep = trackedInstances();
+  if (alsoKeep) keep.add(alsoKeep);
   try {
     const data = await fetchSessionRoster(sessionId);
     const parts = Array.isArray(data?.participants) ? data.participants : [];
     const me = String(irc.nick || "").toLowerCase();
     for (const p of parts) {
       const inst = p?.instance_id;
-      if (!inst) continue;
-      if (keepInstance && inst === keepInstance) continue;
+      if (!inst || keep.has(inst)) continue;
       const nick = p?.nick != null ? String(p.nick) : "";
       if (!nick || nick.toLowerCase() !== me) continue;
       try {
         irc.avLeave(ch, sessionId, inst);
-        log(`av leave roster ${sessionId}/${nick}~${inst} (single-plane cleanup)`);
+        log(`av leave ghost ${sessionId}/${nick}~${inst}`);
       } catch (e) {
-        log(`av leave roster: ${e instanceof Error ? e.message : e}`);
+        log(`av leave ghost: ${e instanceof Error ? e.message : e}`);
       }
     }
   } catch (e) {
-    log(`roster cleanup: ${e instanceof Error ? e.message : e}`);
+    log(`roster ghost cleanup: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -1632,6 +1657,19 @@ function newAvInstance() {
     .padStart(8, "0");
 }
 
+function isFreeqSessionActive(state) {
+  if (state === "Active" || state === "active") return true;
+  // some payloads use { Ended: {...} } vs bare "Active"
+  if (state && typeof state === "object" && !state.Ended) return true;
+  return false;
+}
+
+/**
+ * Pick the freeq AV session we should join on this channel.
+ * freeq can briefly list multiple Active rows after thrash — prefer the room
+ * that already has humans (non-us participants) over an eve-only ghost we just started.
+ * @returns {Promise<string | null>}
+ */
 async function discoverActiveSession(channel) {
   const encoded = encodeURIComponent(channel);
   const url = `${FREEQ_API_BASE}/api/v1/channels/${encoded}/sessions`;
@@ -1639,9 +1677,52 @@ async function discoverActiveSession(channel) {
     const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return null;
     const json = await res.json();
-    const active = json?.active;
-    if (!active || active.state !== "Active") return null;
-    return typeof active.id === "string" ? active.id : null;
+    /** @type {string[]} */
+    const ids = [];
+    const pushId = (id) => {
+      if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
+    };
+    if (json?.active && isFreeqSessionActive(json.active.state)) {
+      pushId(json.active.id);
+    }
+    for (const r of Array.isArray(json?.recent) ? json.recent : []) {
+      if (isFreeqSessionActive(r?.state)) pushId(r?.id);
+    }
+    if (!ids.length) return null;
+
+    const me = String(irc.nick || "").toLowerCase();
+    /** @type {{ id: string, others: number, total: number }[]} */
+    const scored = [];
+    for (const id of ids.slice(0, 8)) {
+      try {
+        const data = await fetchSessionRoster(id);
+        if (!isFreeqSessionActive(data?.state) && data?.state !== undefined) {
+          // roster may omit state; treat missing as ok if listed Active above
+          if (data.state && data.state !== "Active") continue;
+        }
+        const parts = Array.isArray(data?.participants)
+          ? data.participants
+          : [];
+        const total = parts.length;
+        const others = parts.filter(
+          (p) => String(p?.nick ?? "").toLowerCase() !== me,
+        ).length;
+        scored.push({ id, others, total });
+      } catch (e) {
+        log(`discover roster ${id}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    if (!scored.length) {
+      return typeof json?.active?.id === "string" ? json.active.id : ids[0];
+    }
+    scored.sort((a, b) => b.others - a.others || b.total - a.total);
+    const best = scored[0];
+    if (best.others > 0) {
+      log(
+        `discover session: prefer ${best.id} (others=${best.others} total=${best.total}) over ${ids.length} active`,
+      );
+    }
+    return best.id;
   } catch (e) {
     log(`discover session failed: ${e instanceof Error ? e.message : e}`);
     return null;
@@ -1683,8 +1764,9 @@ async function rosterNickForInstance(sessionId, instance, fallbackNick) {
 }
 
 /**
- * Ensure we are joined to an AV call on `channel`, connect media plane.
- * @returns {{ sessionId, instance, sfuUrl, channel, nick }}
+ * Ensure this bridge is joined to the channel's *active* freeq session.
+ * Never tears down other bridges. Prefer reusing a healthy attach over re-join.
+ * @returns {{ sessionId, instance, sfuUrl, channel, nick, bridgeUrl, broadcastPath, session?, reused?: boolean }}
  */
 async function ensureAv(
   channel = IRC_CHANNEL,
@@ -1693,64 +1775,109 @@ async function ensureAv(
   { force = false } = {},
 ) {
   const ch = channel.startsWith("#") ? channel : `#${channel}`;
-  const bridge = (bridgeUrl || AV_BRIDGE_URL).replace(/\/$/, "");
+  const bridge = planeKey(bridgeUrl || AV_BRIDGE_URL);
   // freeq records the IRC nick at av_join time. Guest* nicks break MoQ mesh
   // (clients subscribe to GuestN~inst while we might publish eve~inst).
+  // TAGMSG av-join with no SASL/channel is a no-op on freeq and leaves ghost MoQ.
+  if (!irc.saslOk || !irc.joined) {
+    throw new Error(
+      `IRC not ready for AV (sasl=${irc.saslOk ? "ok" : "no"} joined=${Boolean(irc.joined)} nick=${irc.nick}) — wait for freeq SASL + channel join`,
+    );
+  }
   if (/^guest/i.test(irc.nick)) {
     throw new Error(
       `IRC nick is ${irc.nick} (SASL guest) — fix freeq SASL so nick is eve before radio`,
     );
   }
 
-  // Reuse an already-healthy attachment when possible. Re-join tears down MoQ
-  // taps and can leave humans alone on a prior freeq session id while we
-  // av-start a new empty room (call-egress then never sees their tiles).
-  if (!force) {
-    const freeqId = await discoverActiveSession(ch);
-    if (
-      freeqId &&
-      activePlane?.bridgeUrl === bridge &&
-      activePlane?.sessionId === freeqId &&
-      activePlane?.instance
-    ) {
-      try {
-        const st = await fetch(`${bridge}/v1/status`, {
-          signal: AbortSignal.timeout(3_000),
-        }).then((r) => r.json());
-        if (st?.session?.session_id === freeqId) {
+  const freeqId = await discoverActiveSession(ch);
+
+  // Reuse / re-adopt a healthy attach on this bridge for the live freeq session.
+  // Re-join tears down MoQ taps and can orphan humans on a prior session id.
+  // Bridge MoQ alone is not enough — freeq roster must still list our instance
+  // (av-leave leaves MoQ connected while clients stop subscribing).
+  if (!force && freeqId) {
+    try {
+      const st = await fetch(`${bridge}/v1/status`, {
+        signal: AbortSignal.timeout(3_000),
+      }).then((r) => r.json());
+      const sess = st?.session;
+      if (
+        sess?.session_id === freeqId &&
+        sess?.instance &&
+        sess?.nick &&
+        !/^guest/i.test(String(sess.nick))
+      ) {
+        let onRoster = false;
+        try {
+          const roster = await fetchSessionRoster(freeqId);
+          const parts = Array.isArray(roster?.participants)
+            ? roster.participants
+            : [];
+          onRoster = parts.some(
+            (p) =>
+              p?.instance_id === String(sess.instance) &&
+              String(p?.nick ?? "").toLowerCase() ===
+                String(sess.nick).toLowerCase(),
+          );
+        } catch (e) {
+          log(`ensureAv roster check: ${e instanceof Error ? e.message : e}`);
+        }
+        if (onRoster) {
+          const plane = {
+            bridgeUrl: bridge,
+            sessionId: freeqId,
+            instance: String(sess.instance),
+            nick: String(sess.nick),
+            channel: ch,
+          };
+          activePlanes.set(bridge, plane);
           log(
-            `ensureAv: reusing ${freeqId}/${activePlane.nick}~${activePlane.instance} on ${bridge}`,
+            `ensureAv: reusing ${freeqId}/${plane.nick}~${plane.instance} on ${bridge}`,
           );
           return {
             sessionId: freeqId,
-            instance: activePlane.instance,
+            instance: plane.instance,
             sfuUrl: SFU_URL_RESOLVED,
             channel: ch,
-            nick: activePlane.nick || irc.nick,
+            nick: plane.nick,
             bridgeUrl: bridge,
-            broadcastPath: `${freeqId}/${activePlane.nick || irc.nick}~${activePlane.instance}`,
-            session: st.session,
+            broadcastPath: `${freeqId}/${plane.nick}~${plane.instance}`,
+            session: sess,
             reused: true,
           };
         }
-      } catch (e) {
-        log(`ensureAv reuse check: ${e instanceof Error ? e.message : e}`);
+        log(
+          `ensureAv: bridge has ${freeqId}/${sess.nick}~${sess.instance} but not on freeq roster — rejoin`,
+        );
       }
+    } catch (e) {
+      log(`ensureAv reuse check: ${e instanceof Error ? e.message : e}`);
     }
   }
 
-  // One MoQ plane at a time: leave/disconnect any prior plane before joining.
-  await releasePlanes(bridge);
+  // Replace only THIS bridge's prior freeq instance / MoQ — leave the other plane alone.
+  const prev = activePlanes.get(bridge);
+  if (prev) {
+    await releasePlane(bridge);
+  } else {
+    // Bridge may still be attached from a prior process life or desynced state.
+    // Disconnect this plane only so session/connect can rebind to the live room.
+    await stopBridgeMedia(bridge);
+  }
 
-  let sessionId = await discoverActiveSession(ch);
+  let sessionId = freeqId ?? (await discoverActiveSession(ch));
   const instance = newAvInstance();
 
   if (sessionId) {
-    // Drop any prior eve~instance rows so we never publish twice into one session.
-    await leaveOurRosterInstances(sessionId, ch, null);
-    log(`av join existing ${sessionId} on ${ch} as ${irc.nick}~${instance} via ${bridge}`);
+    // Drop untracked eve~* ghosts only — keep the other plane's instance.
+    await leaveGhostRosterInstances(sessionId, ch, instance);
+    log(
+      `av join existing ${sessionId} on ${ch} as ${irc.nick}~${instance} via ${bridge}`,
+    );
     irc.avJoin(ch, sessionId, instance);
   } else {
+    // No live room — start one. Prefer joining humans who already started.
     log(`av start on ${ch} as ${irc.nick}~${instance} via ${bridge}`);
     const wait = irc.waitAvStarted(ch, 10_000);
     irc.avStart(ch, instance, title);
@@ -1792,13 +1919,16 @@ async function ensureAv(
     `media path ${sessionId}/${nick}~${instance} on ${bridge} (must match freeq roster for clients to hear)`,
   );
 
-  activePlane = {
+  activePlanes.set(bridge, {
     bridgeUrl: bridge,
     sessionId,
     instance,
     nick,
     channel: ch,
-  };
+  });
+
+  // freeq thrash left multiple Active rooms — leave our ghosts on the others.
+  void leaveOtherChannelSessions(ch, sessionId);
 
   return {
     sessionId,
@@ -1812,6 +1942,43 @@ async function ensureAv(
   };
 }
 
+/**
+ * av-leave our nick on every other Active freeq session for this channel.
+ * Keeps humans' room; ends eve-only ghost rooms we created while thrashing.
+ */
+async function leaveOtherChannelSessions(channel, keepSessionId) {
+  const ch = channel.startsWith("#") ? channel : `#${channel}`;
+  const encoded = encodeURIComponent(ch);
+  const url = `${FREEQ_API_BASE}/api/v1/channels/${encoded}/sessions`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return;
+    const json = await res.json();
+    /** @type {string[]} */
+    const ids = [];
+    const pushId = (id) => {
+      if (
+        typeof id === "string" &&
+        id &&
+        id !== keepSessionId &&
+        !ids.includes(id)
+      ) {
+        ids.push(id);
+      }
+    };
+    if (json?.active && isFreeqSessionActive(json.active.state))
+      pushId(json.active.id);
+    for (const r of Array.isArray(json?.recent) ? json.recent : []) {
+      if (isFreeqSessionActive(r?.state)) pushId(r?.id);
+    }
+    for (const id of ids.slice(0, 8)) {
+      await leaveGhostRosterInstances(id, ch, null);
+    }
+  } catch (e) {
+    log(`leave other sessions: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 /** Pick the live stream.place stream with the most viewers. */
 async function pickTopStreamplaceStream() {
   const url = `${STREAMPLACE_API}/xrpc/place.stream.live.getLiveUsers?limit=50`;
@@ -1819,7 +1986,8 @@ async function pickTopStreamplaceStream() {
   if (!res.ok) throw new Error(`stream.place getLiveUsers HTTP ${res.status}`);
   const json = await res.json();
   const streams = Array.isArray(json?.streams) ? json.streams : [];
-  if (!streams.length) throw new Error("no live streams on stream.place right now");
+  if (!streams.length)
+    throw new Error("no live streams on stream.place right now");
 
   const viewers = (s) => {
     const v = s?.viewerCount;
@@ -1918,7 +2086,10 @@ function tryHandleWatch(ircClient, replyTarget, channel, body) {
       const msg = e instanceof Error ? e.message : String(e);
       log(`watch failed: ${msg}`);
       try {
-        ircClient.sendPrivmsg(replyTarget, `watch failed: ${msg}`.slice(0, 350));
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `watch failed: ${msg}`.slice(0, 350),
+        );
       } catch {
         /* ignore */
       }
@@ -1947,10 +2118,14 @@ async function playStreamplace({ channel, streamer } = {}) {
     // Best-effort: enrich title/viewers from current live roster.
     try {
       const liveUrl = `${STREAMPLACE_API}/xrpc/place.stream.live.getLiveUsers?limit=50`;
-      const liveRes = await fetch(liveUrl, { signal: AbortSignal.timeout(8_000) });
+      const liveRes = await fetch(liveUrl, {
+        signal: AbortSignal.timeout(8_000),
+      });
       if (liveRes.ok) {
         const liveJson = await liveRes.json();
-        const streams = Array.isArray(liveJson?.streams) ? liveJson.streams : [];
+        const streams = Array.isArray(liveJson?.streams)
+          ? liveJson.streams
+          : [];
         const idLower = id.toLowerCase();
         const hit = streams.find((s) => {
           const did = String(s?.author?.did ?? "");
@@ -1964,12 +2139,17 @@ async function playStreamplace({ channel, streamer } = {}) {
         if (hit) {
           const v = hit?.viewerCount;
           const count =
-            typeof v === "number" ? v : v && typeof v.count === "number" ? v.count : null;
+            typeof v === "number"
+              ? v
+              : v && typeof v.count === "number"
+                ? v.count
+                : null;
           picked.did = hit?.author?.did ?? picked.did;
           picked.handle = hit?.author?.handle ?? picked.handle;
           picked.title = hit?.record?.title ?? picked.title;
           picked.viewers = count;
-          picked.url = hit?.record?.url ?? `https://stream.place/${picked.did || id}`;
+          picked.url =
+            hit?.record?.url ?? `https://stream.place/${picked.did || id}`;
           const streamerId = picked.did || id;
           picked.hls = `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(streamerId)}`;
         }
@@ -2013,23 +2193,31 @@ async function playStreamplace({ channel, streamer } = {}) {
 
   // Optional channel notice (once per start).
   try {
-    const notice = `stream.place → freeq AV: ${picked.title} (@${picked.handle}, ${picked.viewers ?? "?"} watching) — join voice in ${ch.startsWith("#") ? ch : "#" + ch}`.slice(0, 400);
+    const notice =
+      `stream.place → freeq AV: ${picked.title} (@${picked.handle}, ${picked.viewers ?? "?"} watching) — join voice in ${ch.startsWith("#") ? ch : "#" + ch}`.slice(
+        0,
+        400,
+      );
     irc.sendPrivmsg(ch.startsWith("#") ? ch : `#${ch}`, notice);
   } catch (e) {
     log(`streamplace notice: ${e instanceof Error ? e.message : e}`);
   }
 
-  return { av, stream: picked, radio: json.radio, plane: STREAMPLACE_AV_BRIDGE_URL };
+  return {
+    av,
+    stream: picked,
+    radio: json.radio,
+    plane: STREAMPLACE_AV_BRIDGE_URL,
+  };
 }
 
 async function stopStreamplace() {
   clearStreamplacePref();
-  const plane = STREAMPLACE_AV_BRIDGE_URL.replace(/\/$/, "");
-  if (activePlane?.bridgeUrl === plane) {
-    // Full release: av-leave + disconnect (clears activePlane).
-    await releasePlanes(null);
+  const plane = planeKey(STREAMPLACE_AV_BRIDGE_URL);
+  // Only tear down the watch plane — radio/call on :8790 stays up.
+  if (activePlanes.has(plane)) {
+    await releasePlane(plane);
   } else {
-    // Not tracked as active — still tear down streamplace bridge media.
     await stopBridgeMedia(plane);
   }
   return { ok: true, plane: STREAMPLACE_AV_BRIDGE_URL };
@@ -2058,7 +2246,6 @@ async function streamplaceStatus() {
     topLive: live.ok ? live.top : { error: live.error },
   };
 }
-
 
 // ---------------------------------------------------------------------------
 // stream.place publish plane (inverse of watch): source → RTMP ingest
@@ -2195,14 +2382,9 @@ function stopStreamplacePublish() {
  *
  * @param {{ url?: string, title?: string, channel?: string, mode?: string }} opts
  */
-async function startStreamplacePublish({
-  url,
-  title,
-  channel,
-  mode,
-} = {}) {
+async function startStreamplacePublish({ url, title, channel, mode } = {}) {
   const ch = (channel ?? IRC_CHANNEL).startsWith("#")
-    ? channel ?? IRC_CHANNEL
+    ? (channel ?? IRC_CHANNEL)
     : `#${channel ?? IRC_CHANNEL}`;
   const rtmp = streamplaceRtmpTarget();
 
@@ -2223,7 +2405,9 @@ async function startStreamplacePublish({
   stopStreamplacePublish();
 
   if (publishMode === "call") {
-    log(`streamplace publish CALL → ${ch} plane=${AV_BRIDGE_URL} rtmp=${redactRtmp(rtmp)}`);
+    log(
+      `streamplace publish CALL → ${ch} plane=${AV_BRIDGE_URL} rtmp=${redactRtmp(rtmp)}`,
+    );
     let av;
     try {
       // Prefer joining the freeq room that already has humans — never force a
@@ -2240,7 +2424,9 @@ async function startStreamplacePublish({
     // Brief wait for remote MoQ announces after join (late SFU catalog).
     try {
       const roster = await fetchSessionRoster(av.sessionId);
-      const parts = Array.isArray(roster?.participants) ? roster.participants : [];
+      const parts = Array.isArray(roster?.participants)
+        ? roster.participants
+        : [];
       log(
         `call publish roster ${av.sessionId}: ${parts.map((p) => `${p.nick}~${p.instance_id}`).join(", ") || "(empty)"}`,
       );
@@ -2515,7 +2701,15 @@ function streamplacePublishStatus() {
       publicUrl: streamplacePublishPublicUrl(),
     };
   }
-  const alive = s.proc && s.proc.exitCode == null && !s.proc.killed;
+  const procAlive = Boolean(
+    s.proc && s.proc.exitCode == null && !s.proc.killed,
+  );
+  // call mode has no child proc here — egress lives in av-bridge; treat flagged
+  // callEgress as live until stopStreamplacePublish clears the handle.
+  const alive =
+    s.mode === "call" || s.callEgress
+      ? Boolean(s.callEgress) && s.exitCode == null
+      : procAlive;
   return {
     plane: "streamplace-publish",
     publishing: Boolean(alive),
@@ -2531,6 +2725,7 @@ function streamplacePublishStatus() {
     uptimeMs: Date.now() - s.startedAt,
     exitCode: s.exitCode ?? s.proc?.exitCode ?? null,
     lastError: s.lastError,
+    callEgress: Boolean(s.callEgress),
   };
 }
 
@@ -2600,7 +2795,9 @@ function tryHandlePublish(ircClient, replyTarget, channel, body) {
   const ch = channel || IRC_CHANNEL;
   void (async () => {
     try {
-      log(`publish command → mode=${mode} url=${urlArg || "(mirror)"} on ${ch}`);
+      log(
+        `publish command → mode=${mode} url=${urlArg || "(mirror)"} on ${ch}`,
+      );
       const out = await startStreamplacePublish({
         url: urlArg || undefined,
         channel: ch,
@@ -2763,12 +2960,14 @@ const controlServer = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         nick: irc.nick,
+        saslOk: Boolean(irc.saslOk),
+        joined: Boolean(irc.joined),
         channel: IRC_CHANNEL,
         avBridge: AV_BRIDGE_URL,
         streamplaceBridge: STREAMPLACE_AV_BRIDGE_URL,
         streamplaceAuto: STREAMPLACE_AUTO,
         streamplacePublish: streamplacePublishStatus(),
-        activePlane,
+        activePlanes: activePlanesSnapshot(),
       });
       return;
     }
@@ -2826,7 +3025,10 @@ const controlServer = http.createServer(async (req, res) => {
       sendJson(res, 200, out);
       return;
     }
-    if (req.method === "GET" && url.pathname === "/streamplace/publish/status") {
+    if (
+      req.method === "GET" &&
+      url.pathname === "/streamplace/publish/status"
+    ) {
       sendJson(res, 200, { ok: true, ...streamplacePublishStatus() });
       return;
     }
@@ -2871,8 +3073,7 @@ startRadioTitlePoller();
 
 if (STREAMPLACE_AUTO) {
   // Wait for SASL + channel join, then restore last `watch` (or top live once).
-  // Never clobber an already-playing streamplace plane (e.g. bridge-only restart
-  // while eve-av-bridge-streamplace kept decoding).
+  // Never clobber an already-playing streamplace plane, and never fight call publish.
   setTimeout(() => {
     void (async () => {
       for (let i = 0; i < 30; i++) {
@@ -2880,6 +3081,13 @@ if (STREAMPLACE_AUTO) {
         await new Promise((r) => setTimeout(r, 2_000));
       }
       try {
+        if (
+          streamplacePublish?.mode === "call" ||
+          streamplacePublish?.callEgress
+        ) {
+          log("streamplace auto: call publish active — skip auto watch");
+          return;
+        }
         if (await streamplaceAlreadyPlaying()) {
           log("streamplace auto: plane already playing — leave it alone");
           return;
@@ -2898,11 +3106,9 @@ if (STREAMPLACE_AUTO) {
           );
           return;
         }
-        log("streamplace auto: no pref — starting top live stream");
-        const out = await playStreamplace({ channel: IRC_CHANNEL });
-        log(
-          `streamplace auto ok (top): @${out.stream?.handle} viewers=${out.stream?.viewers} session=${out.av?.sessionId}`,
-        );
+        // No saved pref: do not invent a top-live watch on every boot — that was
+        // thrashing freeq sessions against human calls. Prefer explicit `watch`.
+        log("streamplace auto: no pref — idle (use `watch <handle>` to start)");
       } catch (e) {
         log(`streamplace auto failed: ${e instanceof Error ? e.message : e}`);
       }
