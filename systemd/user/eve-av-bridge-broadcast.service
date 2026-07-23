@@ -1,5 +1,5 @@
 [Unit]
-Description=eve AV bridge (stream-watch: stream.place → freeq MoQ)
+Description=eve AV bridge (stream-broadcast: freeq call → stream.place RTMP)
 Documentation=file://@ROOT@/systemd/README.md
 After=network-online.target eve-av-bridge.service
 PartOf=eve.target
@@ -9,14 +9,13 @@ Type=simple
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=STREAMPLACE_AV_BRIDGE_BIND=127.0.0.1:8792
-Environment=AV_BRIDGE_BIND=127.0.0.1:8792
-Environment=AV_PLANE_ROLE=watch
+Environment=STREAM_BROADCAST_AV_BRIDGE_BIND=127.0.0.1:8793
+Environment=AV_BRIDGE_BIND=127.0.0.1:8793
+Environment=AV_PLANE_ROLE=broadcast
 Environment=RADIO_TITLE_HOOK=
-Environment=AV_INCLUDE_VIDEO=1
 EnvironmentFile=-%h/.config/eve/runtime.env
 EnvironmentFile=-%h/.config/eve/config.env
-ExecStart=@ROOT@/scripts/run-av-bridge-streamplace.sh
+ExecStart=@ROOT@/scripts/run-av-bridge-broadcast.sh
 Restart=on-failure
 RestartSec=5
 

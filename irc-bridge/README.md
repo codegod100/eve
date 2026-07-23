@@ -45,21 +45,28 @@ node irc-bridge/server.mjs
 | `IRC_CONTEXT_MAX_CHARS` | max framed context blob size (default `6000`) |
 | `IRC_WORKING_REACT` | emoji for “working on it” (default `👀`) |
 | `IRC_CONTROL_HOST` / `IRC_CONTROL_PORT` | control HTTP (default `127.0.0.1:8791`) |
-| `AV_BRIDGE_URL` | eve-av-bridge base (default `http://127.0.0.1:8790`) |
+| `RADIO_AV_BRIDGE_URL` / `AV_BRIDGE_URL` | **radio** plane (default `http://127.0.0.1:8790`) |
+| `STREAM_WATCH_AV_BRIDGE_URL` / `STREAMPLACE_AV_BRIDGE_URL` | **stream-watch** plane (default `:8792`) |
+| `STREAM_BROADCAST_AV_BRIDGE_URL` | **stream-broadcast** plane (default `:8793`) |
 | `SFU_URL` | MoQ SFU (default freeq `https://irc.freeq.at:8080/av/moq`) |
 | `FREEQ_API_BASE` | REST for session discovery (default `https://<IRC_HOST>`) |
 | `RADIO_ANNOUNCE` | `1` (default) — PRIVMSG when ICY song title changes |
 | `RADIO_ANNOUNCE_MS` | poll interval for title changes (default `2000`) |
-| `STREAMPLACE_AV_BRIDGE_URL` | watch plane av-bridge (default `http://127.0.0.1:8792`) |
 | `STREAMPLACE_API` | stream.place XRPC base (default `https://stream.place`) |
-| `STREAMPLACE_AUTO` | `1` = restore last saved `watch` on boot (no pref → idle; never invents top-live) |
+| `STREAMPLACE_AUTO` | `1` = restore last saved `watch` on boot (no pref → idle) |
 | `STREAMPLACE_RTMP_URL` | publish ingest base (default `rtmps://stream.place:1935/live`) |
 | `STREAMPLACE_STREAM_KEY` | required for **publish** (from stream.place dashboard) |
 | `STREAMPLACE_PUBLISH_HANDLE` | optional public handle for go-live notices |
 
-**Planes**: radio/call (`:8790`) and stream.place watch (`:8792`) are independent.
-`ensureAv` only leaves/reconnects the bridge you asked for — watch and call no longer
-kick each other off freeq. Both prefer the channel’s existing active session.
+**Three MoQ planes** (separate `eve-av-bridge` processes — do not munge):
+
+| Plane | Port | Role | Control |
+|-------|------|------|---------|
+| radio | `:8790` | internet radio only | `/v1/radio/*` |
+| stream-watch | `:8792` | stream.place HLS → freeq | `/v1/watch/*` |
+| stream-broadcast | `:8793` | freeq call → stream.place RTMP | `/v1/call-egress/*` |
+
+`ensureAv` only leaves/reconnects the bridge you asked for.
 
 ### Control HTTP (eve tools)
 

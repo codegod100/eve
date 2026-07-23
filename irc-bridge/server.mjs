@@ -62,12 +62,28 @@ const CONTEXT_ENABLED = CONTEXT_LINES > 0;
 const CONTROL_HOST = process.env.IRC_CONTROL_HOST ?? "127.0.0.1";
 const CONTROL_PORT = Number(process.env.IRC_CONTROL_PORT ?? 8791);
 /** eve-av-bridge base URL (media plane). */
-const AV_BRIDGE_URL = (
-  process.env.AV_BRIDGE_URL ?? "http://127.0.0.1:8790"
+/**
+ * Three freeq MoQ planes (separate eve-av-bridge processes — do not munge):
+ *   radio       :8790  internet radio only          AV_PLANE_ROLE=radio
+ *   stream-watch:8792  stream.place → freeq HLS     AV_PLANE_ROLE=watch
+ *   stream-broadcast :8793  freeq call → stream.place RTMP  AV_PLANE_ROLE=broadcast
+ */
+const RADIO_AV_BRIDGE_URL = (
+  process.env.RADIO_AV_BRIDGE_URL ??
+  process.env.AV_BRIDGE_URL ??
+  "http://127.0.0.1:8790"
 ).replace(/\/$/, "");
-/** Second MoQ plane — stream.place live rebroadcast (default :8792). */
-const STREAMPLACE_AV_BRIDGE_URL = (
-  process.env.STREAMPLACE_AV_BRIDGE_URL ?? "http://127.0.0.1:8792"
+/** @deprecated alias — radio plane */
+const AV_BRIDGE_URL = RADIO_AV_BRIDGE_URL;
+const STREAM_WATCH_AV_BRIDGE_URL = (
+  process.env.STREAM_WATCH_AV_BRIDGE_URL ??
+  process.env.STREAMPLACE_AV_BRIDGE_URL ??
+  "http://127.0.0.1:8792"
+).replace(/\/$/, "");
+/** @deprecated alias — stream-watch plane */
+const STREAMPLACE_AV_BRIDGE_URL = STREAM_WATCH_AV_BRIDGE_URL;
+const STREAM_BROADCAST_AV_BRIDGE_URL = (
+  process.env.STREAM_BROADCAST_AV_BRIDGE_URL ?? "http://127.0.0.1:8793"
 ).replace(/\/$/, "");
 /** stream.place XRPC base */
 const STREAMPLACE_API = (
@@ -164,7 +180,7 @@ async function streamplaceAlreadyPlaying() {
     });
     if (!res.ok) return false;
     const j = await res.json();
-    return Boolean(j?.radio?.playing && j?.session);
+    return Boolean((j?.watch?.playing || j?.radio?.playing) && j?.session);
   } catch {
     return false;
   }
@@ -1525,9 +1541,8 @@ process.on("SIGINT", () => {
 // AV ensure + radio (orchestrates TAGMSG + eve-av-bridge)
 // ---------------------------------------------------------------------------
 // freeq allows multiple MoQ publishers. We keep up to one attachment *per bridge*:
-//   :8790 radio / call-egress    :8792 stream.place watch
-// Planes must not tear each other down — that was the session thrash (av-leave
-// the other plane → ghost sessions → humans alone while eve sits on a dead room).
+//   :8790 radio | :8792 stream-watch | :8793 stream-broadcast
+// Planes must not tear each other down or share play APIs.
 
 /**
  * @typedef {{ bridgeUrl: string, sessionId: string, instance: string, nick: string, channel: string }} AvPlane
@@ -1542,7 +1557,11 @@ function planeKey(url) {
 function knownPlaneUrls() {
   return [
     ...new Set(
-      [AV_BRIDGE_URL, STREAMPLACE_AV_BRIDGE_URL].map((u) => planeKey(u)),
+      [
+        RADIO_AV_BRIDGE_URL,
+        STREAM_WATCH_AV_BRIDGE_URL,
+        STREAM_BROADCAST_AV_BRIDGE_URL,
+      ].map((u) => planeKey(u)),
     ),
   ];
 }
@@ -1567,13 +1586,20 @@ function trackedInstances() {
 /** Stop radio + MoQ on a bridge (best-effort). Does not av-leave freeq. */
 async function stopBridgeMedia(bridgeUrl) {
   const bridge = planeKey(bridgeUrl);
-  try {
-    await fetch(`${bridge}/v1/radio/stop`, {
-      method: "POST",
-      signal: AbortSignal.timeout(5_000),
-    });
-  } catch (e) {
-    log(`plane radio stop ${bridge}: ${e instanceof Error ? e.message : e}`);
+  // Stop role-specific sources first (do not munge APIs).
+  for (const path of [
+    "/v1/radio/stop",
+    "/v1/watch/stop",
+    "/v1/call-egress/stop",
+  ]) {
+    try {
+      await fetch(`${bridge}${path}`, {
+        method: "POST",
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch (e) {
+      log(`plane ${path} ${bridge}: ${e instanceof Error ? e.message : e}`);
+    }
   }
   try {
     await fetch(`${bridge}/v1/session/disconnect`, {
@@ -2193,7 +2219,8 @@ async function playStreamplace({ channel, streamer } = {}) {
     av = { channel: ch, error: String(e) };
   }
 
-  const res = await fetch(`${STREAMPLACE_AV_BRIDGE_URL}/v1/radio/play`, {
+  // stream-watch plane only — never radio/play.
+  const res = await fetch(`${STREAM_WATCH_AV_BRIDGE_URL}/v1/watch/play`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ url: picked.hls }),
@@ -2320,7 +2347,9 @@ async function tryFollowHumanSession({ channel, bridgeUrl, title, radioUrl }) {
   );
   await ensureAv(ch, title || "stream.place", bridge, { force: true });
   if (radioUrl) {
-    const res = await fetch(`${bridge}/v1/radio/play`, {
+    const isWatch = planeKey(bridge) === planeKey(STREAM_WATCH_AV_BRIDGE_URL);
+    const path = isWatch ? "/v1/watch/play" : "/v1/radio/play";
+    const res = await fetch(`${bridge}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url: radioUrl }),
@@ -2328,7 +2357,7 @@ async function tryFollowHumanSession({ channel, bridgeUrl, title, radioUrl }) {
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok || json.ok === false) {
-      throw new Error(json.error || `follow radio play HTTP ${res.status}`);
+      throw new Error(json.error || `follow ${path} HTTP ${res.status}`);
     }
   }
   return true;
@@ -2484,7 +2513,7 @@ function stopStreamplacePublish() {
     }, 2_000).unref?.();
   }
   if (prev?.callEgress || prev?.mode === "call") {
-    void fetch(`${AV_BRIDGE_URL}/v1/call-egress/stop`, {
+    void fetch(`${STREAM_BROADCAST_AV_BRIDGE_URL}/v1/call-egress/stop`, {
       method: "POST",
       signal: AbortSignal.timeout(5_000),
     }).catch((e) =>
@@ -2529,18 +2558,20 @@ async function startStreamplacePublish({ url, title, channel, mode } = {}) {
 
   if (publishMode === "call") {
     log(
-      `streamplace publish CALL → ${ch} plane=${AV_BRIDGE_URL} rtmp=${redactRtmp(rtmp)}`,
+      `stream-broadcast CALL → ${ch} plane=${STREAM_BROADCAST_AV_BRIDGE_URL} rtmp=${redactRtmp(rtmp)}`,
     );
     let av;
     try {
-      // Prefer joining the freeq room that already has humans — never force a
-      // fresh av-start when an active session exists (reuse MoQ when possible).
-      av = await ensureAv(ch, label.slice(0, 120), AV_BRIDGE_URL, {
-        force: false,
-      });
+      // Broadcast plane only — never radio or stream-watch.
+      av = await ensureAv(
+        ch,
+        label.slice(0, 120),
+        STREAM_BROADCAST_AV_BRIDGE_URL,
+        { force: false },
+      );
     } catch (e) {
       throw new Error(
-        `freeq AV join failed (need SASL nick + av-bridge): ${e instanceof Error ? e.message : e}`,
+        `freeq AV join failed (need SASL nick + broadcast av-bridge :8793): ${e instanceof Error ? e.message : e}`,
       );
     }
 
@@ -2554,11 +2585,9 @@ async function startStreamplacePublish({ url, title, channel, mode } = {}) {
         `call publish roster ${av.sessionId}: ${parts.map((p) => `${p.nick}~${p.instance_id}`).join(", ") || "(empty)"}`,
       );
       for (let i = 0; i < 10; i++) {
-        const st = await fetch(`${AV_BRIDGE_URL}/v1/status`, {
+        const st = await fetch(`${STREAM_BROADCAST_AV_BRIDGE_URL}/v1/status`, {
           signal: AbortSignal.timeout(3_000),
         }).then((r) => r.json());
-        const n = st?.call_egress?.participants ?? 0;
-        // participants only updates after egress starts; just wait for session
         if (st?.session?.session_id === av.sessionId) break;
         await sleep(300);
       }
@@ -2566,12 +2595,15 @@ async function startStreamplacePublish({ url, title, channel, mode } = {}) {
       log(`call publish roster: ${e instanceof Error ? e.message : e}`);
     }
 
-    const res = await fetch(`${AV_BRIDGE_URL}/v1/call-egress/start`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ rtmp_url: rtmp }),
-      signal: AbortSignal.timeout(30_000),
-    });
+    const res = await fetch(
+      `${STREAM_BROADCAST_AV_BRIDGE_URL}/v1/call-egress/start`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rtmp_url: rtmp }),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
     const json = await res.json().catch(() => ({}));
     if (!res.ok || json.ok === false) {
       throw new Error(json.error || `call-egress start HTTP ${res.status}`);
@@ -2961,7 +2993,7 @@ async function playRadio({ url, channel, title }) {
     );
     av = { channel: radioAnnounceChannel, error: String(e) };
   }
-  const res = await fetch(`${AV_BRIDGE_URL}/v1/radio/play`, {
+  const res = await fetch(`${RADIO_AV_BRIDGE_URL}/v1/radio/play`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ url }),
@@ -2976,7 +3008,7 @@ async function playRadio({ url, channel, title }) {
 
 async function stopRadio() {
   try {
-    await fetch(`${AV_BRIDGE_URL}/v1/radio/stop`, {
+    await fetch(`${RADIO_AV_BRIDGE_URL}/v1/radio/stop`, {
       method: "POST",
       signal: AbortSignal.timeout(5_000),
     });
@@ -3086,8 +3118,11 @@ const controlServer = http.createServer(async (req, res) => {
         saslOk: Boolean(irc.saslOk),
         joined: Boolean(irc.joined),
         channel: IRC_CHANNEL,
-        avBridge: AV_BRIDGE_URL,
-        streamplaceBridge: STREAMPLACE_AV_BRIDGE_URL,
+        radioBridge: RADIO_AV_BRIDGE_URL,
+        streamWatchBridge: STREAM_WATCH_AV_BRIDGE_URL,
+        streamBroadcastBridge: STREAM_BROADCAST_AV_BRIDGE_URL,
+        avBridge: RADIO_AV_BRIDGE_URL,
+        streamplaceBridge: STREAM_WATCH_AV_BRIDGE_URL,
         streamplaceAuto: STREAMPLACE_AUTO,
         streamplacePublish: streamplacePublishStatus(),
         activePlanes: activePlanesSnapshot(),

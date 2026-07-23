@@ -7,6 +7,7 @@ export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIND="${AV_BRIDGE_BIND:-127.0.0.1:8790}"
+export AV_PLANE_ROLE="${AV_PLANE_ROLE:-radio}"
 export RADIO_TITLE_HOOK="${RADIO_TITLE_HOOK:-http://127.0.0.1:8791/radio/now-playing}"
 
 candidates=(
