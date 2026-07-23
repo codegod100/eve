@@ -131,3 +131,21 @@ Eve tools: `play_radio` / `stop_radio` (skill `freeq-radio`).
 
 1. Eve: `utterance` → STT → model → TTS → `speak_pcm`
 2. Optional feature `irc-signaling` for a single-process agent (not with text bridge)
+
+
+## Call egress (freeq room → stream.place)
+
+When connected to a freeq AV session, mix **all remote participants** into one
+720p grid + stereo audio and push RTMP (e.g. stream.place):
+
+```bash
+# after /v1/session/connect
+curl -sS -X POST http://127.0.0.1:8790/v1/call-egress/start \
+  -H 'content-type: application/json' \
+  -d '{"rtmp_url":"rtmps://stream.place:1935/live/YOUR_STREAM_KEY"}'
+curl -sS http://127.0.0.1:8790/v1/status | jq .call_egress
+curl -sS -X POST http://127.0.0.1:8790/v1/call-egress/stop
+```
+
+Orchestrated by irc-bridge: `POST /streamplace/publish` with `mode: "call"`
+(or `eve: go live`). Requires **ffmpeg** and a stream.place stream key.

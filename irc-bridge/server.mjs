@@ -8,6 +8,7 @@
  *
  * Eve never opens an IRC socket. HMR/restart of eve does not drop IRC.
  */
+import * as child_process from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -76,6 +77,26 @@ const STREAMPLACE_API = (
 const STREAMPLACE_AUTO =
   process.env.STREAMPLACE_AUTO === "1" ||
   process.env.STREAMPLACE_AUTO === "true";
+
+/**
+ * Inverse plane: freeq / source URL → stream.place RTMP ingest.
+ * Not a freeq MoQ attach — egress only. Can run while a freeq plane is live.
+ *
+ * Dashboard: stream.place → Live Dashboard → Stream from OBS → Generate Stream Key
+ * Server default: rtmps://stream.place:1935/live/<key>
+ */
+const STREAMPLACE_RTMP_URL = (
+  process.env.STREAMPLACE_RTMP_URL ?? "rtmps://stream.place:1935/live"
+).replace(/\/$/, "");
+/** Required to publish. Prefer ~/.config/eve/config.env (mode 0600). */
+const STREAMPLACE_STREAM_KEY = (process.env.STREAMPLACE_STREAM_KEY ?? "").trim();
+/** Public page for notices, e.g. eve.boxd.sh or did:plc:… */
+const STREAMPLACE_PUBLISH_HANDLE = (
+  process.env.STREAMPLACE_PUBLISH_HANDLE ?? ""
+).trim();
+const STREAMPLACE_PUBLISH_LOG =
+  process.env.STREAMPLACE_PUBLISH_LOG ??
+  path.join(os.homedir(), "logs/streamplace-publish.log");
 
 /** Persist last explicit stream.place target so restarts don't clobber `watch`. */
 const STREAMPLACE_PREF_PATH =
@@ -1282,6 +1303,10 @@ class IrcClient {
         log(`watch command from ${from} in ${target}: ${body.slice(0, 80)}`);
         return;
       }
+      if (tryHandlePublish(this, target, target, body)) {
+        log(`publish command from ${from} in ${target}: ${body.slice(0, 80)}`);
+        return;
+      }
       // Background scrollback only — one framed blob, not answerable history.
       const context = formatContext(target, {
         excludeFrom: from,
@@ -1305,6 +1330,10 @@ class IrcClient {
     const dmBody = text.trim();
     if (tryHandleWatch(this, from, IRC_CHANNEL, dmBody)) {
       log(`watch command DM from ${from}: ${dmBody.slice(0, 80)}`);
+      return;
+    }
+    if (tryHandlePublish(this, from, IRC_CHANNEL, dmBody)) {
+      log(`publish command DM from ${from}: ${dmBody.slice(0, 80)}`);
       return;
     }
     const context = formatContext(from, {
@@ -1478,10 +1507,12 @@ const irc = new IrcClient({
 });
 
 process.on("SIGTERM", () => {
+  stopStreamplacePublish();
   irc.stop();
   process.exit(0);
 });
 process.on("SIGINT", () => {
+  stopStreamplacePublish();
   irc.stop();
   process.exit(0);
 });
@@ -1659,6 +1690,7 @@ async function ensureAv(
   channel = IRC_CHANNEL,
   title = "eve radio",
   bridgeUrl = AV_BRIDGE_URL,
+  { force = false } = {},
 ) {
   const ch = channel.startsWith("#") ? channel : `#${channel}`;
   const bridge = (bridgeUrl || AV_BRIDGE_URL).replace(/\/$/, "");
@@ -1668,6 +1700,43 @@ async function ensureAv(
     throw new Error(
       `IRC nick is ${irc.nick} (SASL guest) — fix freeq SASL so nick is eve before radio`,
     );
+  }
+
+  // Reuse an already-healthy attachment when possible. Re-join tears down MoQ
+  // taps and can leave humans alone on a prior freeq session id while we
+  // av-start a new empty room (call-egress then never sees their tiles).
+  if (!force) {
+    const freeqId = await discoverActiveSession(ch);
+    if (
+      freeqId &&
+      activePlane?.bridgeUrl === bridge &&
+      activePlane?.sessionId === freeqId &&
+      activePlane?.instance
+    ) {
+      try {
+        const st = await fetch(`${bridge}/v1/status`, {
+          signal: AbortSignal.timeout(3_000),
+        }).then((r) => r.json());
+        if (st?.session?.session_id === freeqId) {
+          log(
+            `ensureAv: reusing ${freeqId}/${activePlane.nick}~${activePlane.instance} on ${bridge}`,
+          );
+          return {
+            sessionId: freeqId,
+            instance: activePlane.instance,
+            sfuUrl: SFU_URL_RESOLVED,
+            channel: ch,
+            nick: activePlane.nick || irc.nick,
+            bridgeUrl: bridge,
+            broadcastPath: `${freeqId}/${activePlane.nick || irc.nick}~${activePlane.instance}`,
+            session: st.session,
+            reused: true,
+          };
+        }
+      } catch (e) {
+        log(`ensureAv reuse check: ${e instanceof Error ? e.message : e}`);
+      }
+    }
   }
 
   // One MoQ plane at a time: leave/disconnect any prior plane before joining.
@@ -1990,6 +2059,572 @@ async function streamplaceStatus() {
   };
 }
 
+
+// ---------------------------------------------------------------------------
+// stream.place publish plane (inverse of watch): source → RTMP ingest
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {{
+ *   proc: import("node:child_process").ChildProcess,
+ *   sourceUrl: string,
+ *   title: string,
+ *   mode: string,
+ *   rtmpBase: string,
+ *   publicUrl: string | null,
+ *   channel: string,
+ *   startedAt: number,
+ *   exitCode: number | null,
+ *   lastError: string | null,
+ * }} StreamplacePublishState
+ */
+
+/** @type {StreamplacePublishState | null} */
+let streamplacePublish = null;
+
+function streamplacePublishPublicUrl() {
+  if (STREAMPLACE_PUBLISH_HANDLE) {
+    const h = STREAMPLACE_PUBLISH_HANDLE.replace(/^@/, "");
+    return `https://stream.place/${h}`;
+  }
+  return null;
+}
+
+function streamplaceRtmpTarget() {
+  if (!STREAMPLACE_STREAM_KEY) {
+    throw new Error(
+      "STREAMPLACE_STREAM_KEY not set — generate a key in stream.place Live Dashboard and put it in ~/.config/eve/config.env",
+    );
+  }
+  const base = STREAMPLACE_RTMP_URL.replace(/\/$/, "");
+  const key = STREAMPLACE_STREAM_KEY.replace(/^\//, "");
+  // Avoid double-appending if user already put the key in the URL.
+  if (base.endsWith(`/${key}`) || base.includes(key)) return base;
+  return `${base}/${key}`;
+}
+
+/** Mask stream key in logs / status. */
+function redactRtmp(url) {
+  if (!STREAMPLACE_STREAM_KEY) return url;
+  return String(url).split(STREAMPLACE_STREAM_KEY).join("***");
+}
+
+/**
+ * Prefer explicit URL; else mirror currently playing freeq radio on either plane.
+ * @param {string | undefined} explicit
+ */
+async function resolvePublishSourceUrl(explicit) {
+  if (explicit && String(explicit).trim()) return String(explicit).trim();
+  for (const bridge of knownPlaneUrls()) {
+    try {
+      const res = await fetch(`${bridge}/v1/status`, {
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (!res.ok) continue;
+      const j = await res.json();
+      const url = j?.radio?.url ?? j?.radio?.source_url ?? j?.radio?.source;
+      if (j?.radio?.playing && url) {
+        log(`streamplace publish: mirroring radio from ${bridge}: ${url}`);
+        return String(url);
+      }
+    } catch (e) {
+      log(
+        `streamplace publish status ${bridge}: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+  throw new Error(
+    "url required (or start freeq radio / streamplace watch first so publish can mirror the active source)",
+  );
+}
+
+function appendPublishLog(line) {
+  try {
+    fs.mkdirSync(path.dirname(STREAMPLACE_PUBLISH_LOG), { recursive: true });
+    fs.appendFileSync(
+      STREAMPLACE_PUBLISH_LOG,
+      `${new Date().toISOString()} ${line}\n`,
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Stop freeq→stream.place RTMP publish (best-effort).
+ * @returns {{ ok: true, wasPublishing: boolean }}
+ */
+function stopStreamplacePublish() {
+  const prev = streamplacePublish;
+  streamplacePublish = null;
+  if (prev?.proc && !prev.proc.killed) {
+    try {
+      prev.proc.kill("SIGTERM");
+    } catch (e) {
+      log(`streamplace publish kill: ${e instanceof Error ? e.message : e}`);
+    }
+    setTimeout(() => {
+      try {
+        if (prev.proc && !prev.proc.killed && prev.proc.exitCode == null) {
+          prev.proc.kill("SIGKILL");
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 2_000).unref?.();
+  }
+  if (prev?.callEgress || prev?.mode === "call") {
+    void fetch(`${AV_BRIDGE_URL}/v1/call-egress/stop`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5_000),
+    }).catch((e) =>
+      log(`call-egress stop: ${e instanceof Error ? e.message : e}`),
+    );
+  }
+  if (prev) log(`streamplace publish stopped (was ${prev.sourceUrl})`);
+  return { ok: true, wasPublishing: Boolean(prev) };
+}
+
+/**
+ * freeq call / media URL → stream.place RTMP (inverse of watch plane).
+ *
+ * mode:
+ *   - "call" (default when no url): mix freeq AV room via av-bridge call-egress
+ *   - "audio": black 720p slate + source audio URL (radio-friendly)
+ *   - "av": re-encode source URL video+audio
+ *
+ * @param {{ url?: string, title?: string, channel?: string, mode?: string }} opts
+ */
+async function startStreamplacePublish({
+  url,
+  title,
+  channel,
+  mode,
+} = {}) {
+  const ch = (channel ?? IRC_CHANNEL).startsWith("#")
+    ? channel ?? IRC_CHANNEL
+    : `#${channel ?? IRC_CHANNEL}`;
+  const rtmp = streamplaceRtmpTarget();
+
+  // Default: call mix when no explicit media URL; URL modes when url given.
+  let publishMode = mode;
+  if (!publishMode) {
+    publishMode = url ? "audio" : "call";
+  }
+  if (publishMode === "room") publishMode = "call";
+
+  const label =
+    (title && String(title).trim()) ||
+    (publishMode === "call"
+      ? "freeq call → stream.place"
+      : `eve → stream.place (${publishMode})`);
+
+  // Stop prior URL-ffmpeg publish; call-egress is stopped via bridge API when starting call mode.
+  stopStreamplacePublish();
+
+  if (publishMode === "call") {
+    log(`streamplace publish CALL → ${ch} plane=${AV_BRIDGE_URL} rtmp=${redactRtmp(rtmp)}`);
+    let av;
+    try {
+      // Prefer joining the freeq room that already has humans — never force a
+      // fresh av-start when an active session exists (reuse MoQ when possible).
+      av = await ensureAv(ch, label.slice(0, 120), AV_BRIDGE_URL, {
+        force: false,
+      });
+    } catch (e) {
+      throw new Error(
+        `freeq AV join failed (need SASL nick + av-bridge): ${e instanceof Error ? e.message : e}`,
+      );
+    }
+
+    // Brief wait for remote MoQ announces after join (late SFU catalog).
+    try {
+      const roster = await fetchSessionRoster(av.sessionId);
+      const parts = Array.isArray(roster?.participants) ? roster.participants : [];
+      log(
+        `call publish roster ${av.sessionId}: ${parts.map((p) => `${p.nick}~${p.instance_id}`).join(", ") || "(empty)"}`,
+      );
+      for (let i = 0; i < 10; i++) {
+        const st = await fetch(`${AV_BRIDGE_URL}/v1/status`, {
+          signal: AbortSignal.timeout(3_000),
+        }).then((r) => r.json());
+        const n = st?.call_egress?.participants ?? 0;
+        // participants only updates after egress starts; just wait for session
+        if (st?.session?.session_id === av.sessionId) break;
+        await sleep(300);
+      }
+    } catch (e) {
+      log(`call publish roster: ${e instanceof Error ? e.message : e}`);
+    }
+
+    const res = await fetch(`${AV_BRIDGE_URL}/v1/call-egress/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rtmp_url: rtmp }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json.ok === false) {
+      throw new Error(json.error || `call-egress start HTTP ${res.status}`);
+    }
+
+    streamplacePublish = {
+      proc: null,
+      sourceUrl: `freeq-call:${av?.sessionId || "?"}`,
+      title: label,
+      mode: "call",
+      rtmpBase: STREAMPLACE_RTMP_URL,
+      publicUrl: streamplacePublishPublicUrl(),
+      channel: ch,
+      startedAt: Date.now(),
+      exitCode: null,
+      lastError: null,
+      callEgress: true,
+      av,
+    };
+
+    try {
+      const pub = streamplacePublish.publicUrl
+        ? ` ${streamplacePublish.publicUrl}`
+        : "";
+      const notice =
+        `freeq call → stream.place${pub} — join freeq AV in ${ch} so your tile is in the mix; announce on stream.place dashboard`.slice(
+          0,
+          400,
+        );
+      irc.sendPrivmsg(ch, notice);
+    } catch (e) {
+      log(`streamplace publish notice: ${e instanceof Error ? e.message : e}`);
+    }
+
+    return {
+      ok: true,
+      plane: "streamplace-publish-call",
+      sourceUrl: streamplacePublish.sourceUrl,
+      title: label,
+      mode: "call",
+      rtmp: redactRtmp(rtmp),
+      publicUrl: streamplacePublish.publicUrl,
+      channel: ch,
+      pid: json.call_egress?.pid ?? null,
+      startedAt: streamplacePublish.startedAt,
+      av,
+      call_egress: json.call_egress,
+    };
+  }
+
+  // URL-based ffmpeg publish (legacy inverse of radio play).
+  const sourceUrl = await resolvePublishSourceUrl(url);
+  const publishModeUrl = publishMode === "av" ? "av" : "audio";
+
+  /** @type {string[]} */
+  let args;
+  if (publishModeUrl === "av") {
+    args = [
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-re",
+      "-i",
+      sourceUrl,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-tune",
+      "zerolatency",
+      "-pix_fmt",
+      "yuv420p",
+      "-g",
+      "30",
+      "-keyint_min",
+      "30",
+      "-sc_threshold",
+      "0",
+      "-bf",
+      "0",
+      "-b:v",
+      "2500k",
+      "-maxrate",
+      "2500k",
+      "-bufsize",
+      "5000k",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-f",
+      "flv",
+      rtmp,
+    ];
+  } else {
+    args = [
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-re",
+      "-i",
+      sourceUrl,
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0x111111:s=1280x720:r=30",
+      "-map",
+      "1:v:0",
+      "-map",
+      "0:a:0?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-tune",
+      "zerolatency",
+      "-pix_fmt",
+      "yuv420p",
+      "-g",
+      "30",
+      "-keyint_min",
+      "30",
+      "-sc_threshold",
+      "0",
+      "-bf",
+      "0",
+      "-b:v",
+      "1500k",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-shortest",
+      "-f",
+      "flv",
+      rtmp,
+    ];
+  }
+
+  log(
+    `streamplace publish start mode=${publishModeUrl} src=${sourceUrl} → ${redactRtmp(rtmp)}`,
+  );
+  appendPublishLog(
+    `start mode=${publishModeUrl} src=${sourceUrl} rtmp=${redactRtmp(rtmp)}`,
+  );
+
+  const proc = child_process.spawn("ffmpeg", args, {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  /** @type {StreamplacePublishState} */
+  const state = {
+    proc,
+    sourceUrl,
+    title: label,
+    mode: publishModeUrl,
+    rtmpBase: STREAMPLACE_RTMP_URL,
+    publicUrl: streamplacePublishPublicUrl(),
+    channel: ch,
+    startedAt: Date.now(),
+    exitCode: null,
+    lastError: null,
+    callEgress: false,
+  };
+  streamplacePublish = state;
+
+  let errBuf = "";
+  proc.stderr?.on("data", (chunk) => {
+    const s = chunk.toString();
+    errBuf = (errBuf + s).slice(-4000);
+    appendPublishLog(s.trimEnd());
+  });
+  proc.on("error", (e) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    log(`streamplace publish spawn error: ${msg}`);
+    if (streamplacePublish?.proc === proc) {
+      streamplacePublish.lastError = msg;
+    }
+    appendPublishLog(`spawn error: ${msg}`);
+  });
+  proc.on("exit", (code, signal) => {
+    log(
+      `streamplace publish exit code=${code} signal=${signal ?? "-"} src=${sourceUrl}`,
+    );
+    appendPublishLog(`exit code=${code} signal=${signal ?? "-"}`);
+    if (streamplacePublish?.proc === proc) {
+      streamplacePublish.exitCode = code;
+      if (code && code !== 0) {
+        streamplacePublish.lastError =
+          errBuf.trim().split("\n").slice(-5).join(" | ") ||
+          `ffmpeg exit ${code}`;
+      }
+      streamplacePublish.proc = proc;
+    }
+  });
+
+  // Give ffmpeg a moment to fail fast (missing key, bad URL).
+  await new Promise((r) => setTimeout(r, 1_500));
+  if (proc.exitCode != null && proc.exitCode !== 0) {
+    const err =
+      state.lastError ||
+      errBuf.trim().split("\n").slice(-3).join(" | ") ||
+      `ffmpeg exited ${proc.exitCode}`;
+    streamplacePublish = null;
+    throw new Error(`streamplace publish failed: ${err}`);
+  }
+
+  try {
+    const pub = state.publicUrl ? ` ${state.publicUrl}` : "";
+    const notice =
+      `freeq → stream.place: ${label} (mode=${publishModeUrl})${pub} — announce the livestream on stream.place dashboard if needed`.slice(
+        0,
+        400,
+      );
+    irc.sendPrivmsg(ch, notice);
+  } catch (e) {
+    log(`streamplace publish notice: ${e instanceof Error ? e.message : e}`);
+  }
+
+  return {
+    ok: true,
+    plane: "streamplace-publish",
+    sourceUrl,
+    title: label,
+    mode: publishModeUrl,
+    rtmp: redactRtmp(rtmp),
+    publicUrl: state.publicUrl,
+    channel: ch,
+    pid: proc.pid,
+    startedAt: state.startedAt,
+  };
+}
+
+function streamplacePublishStatus() {
+  const s = streamplacePublish;
+  if (!s) {
+    return {
+      plane: "streamplace-publish",
+      publishing: false,
+      configured: Boolean(STREAMPLACE_STREAM_KEY),
+      rtmpBase: STREAMPLACE_RTMP_URL,
+      publicUrl: streamplacePublishPublicUrl(),
+    };
+  }
+  const alive = s.proc && s.proc.exitCode == null && !s.proc.killed;
+  return {
+    plane: "streamplace-publish",
+    publishing: Boolean(alive),
+    configured: Boolean(STREAMPLACE_STREAM_KEY),
+    sourceUrl: s.sourceUrl,
+    title: s.title,
+    mode: s.mode,
+    rtmpBase: s.rtmpBase,
+    publicUrl: s.publicUrl,
+    channel: s.channel,
+    pid: s.proc?.pid ?? null,
+    startedAt: s.startedAt,
+    uptimeMs: Date.now() - s.startedAt,
+    exitCode: s.exitCode ?? s.proc?.exitCode ?? null,
+    lastError: s.lastError,
+  };
+}
+
+/**
+ * Fast-path: go live / publish to stream.place (inverse of watch).
+ * @returns {boolean} true if handled
+ */
+function tryHandlePublish(ircClient, replyTarget, channel, body) {
+  const raw = String(body ?? "").trim();
+  // stop live | end stream | stop publish
+  if (/^(?:stop\s+live|end\s+stream|stop\s+publish|unpublish)\b/i.test(raw)) {
+    void (async () => {
+      try {
+        const out = stopStreamplacePublish();
+        ircClient.sendPrivmsg(
+          replyTarget,
+          out.wasPublishing
+            ? "stopped stream.place publish"
+            : "stream.place publish was not running",
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `publish stop failed: ${msg}`.slice(0, 350),
+        );
+      }
+    })();
+    return true;
+  }
+
+  // go live [url] | publish [url] | streamplace-publish [url]
+  const m = raw.match(
+    /^(?:go\s+live|publish|streamplace-publish)(?:\s+|:\s*)?(.*)$/i,
+  );
+  if (!m) return false;
+  const rest = (m[1] ?? "").trim();
+  // Don't steal plain "publish" from other agent turns with long prose —
+  // only treat as command when it's go live / streamplace-publish or
+  // publish with a URL-ish argument / empty (mirror).
+  const cmd = raw.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (
+    cmd === "publish" &&
+    rest &&
+    !/^https?:\/\//i.test(rest) &&
+    !/^(av|audio|call|room)\b/i.test(rest)
+  ) {
+    return false;
+  }
+
+  let mode = "call";
+  let urlArg = rest;
+  if (/^av\b/i.test(rest)) {
+    mode = "av";
+    urlArg = rest.replace(/^av\s*/i, "").trim();
+  } else if (/^audio\b/i.test(rest)) {
+    mode = "audio";
+    urlArg = rest.replace(/^audio\s*/i, "").trim();
+  } else if (/^(?:call|room)\b/i.test(rest)) {
+    mode = "call";
+    urlArg = rest.replace(/^(?:call|room)\s*/i, "").trim();
+  } else if (/^https?:\/\//i.test(rest)) {
+    mode = "audio";
+    urlArg = rest;
+  }
+
+  const ch = channel || IRC_CHANNEL;
+  void (async () => {
+    try {
+      log(`publish command → mode=${mode} url=${urlArg || "(mirror)"} on ${ch}`);
+      const out = await startStreamplacePublish({
+        url: urlArg || undefined,
+        channel: ch,
+        mode,
+      });
+      log(
+        `publish ok pid=${out.pid} src=${out.sourceUrl} public=${out.publicUrl ?? "-"}`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log(`publish failed: ${msg}`);
+      try {
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `publish failed: ${msg}`.slice(0, 350),
+        );
+      } catch {
+        /* ignore */
+      }
+    }
+  })();
+  return true;
+}
+
 async function playRadio({ url, channel, title }) {
   if (!url) throw new Error("url required");
   const ch = channel ?? IRC_CHANNEL;
@@ -2132,6 +2767,7 @@ const controlServer = http.createServer(async (req, res) => {
         avBridge: AV_BRIDGE_URL,
         streamplaceBridge: STREAMPLACE_AV_BRIDGE_URL,
         streamplaceAuto: STREAMPLACE_AUTO,
+        streamplacePublish: streamplacePublishStatus(),
         activePlane,
       });
       return;
@@ -2167,7 +2803,31 @@ const controlServer = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/streamplace/status") {
       const out = await streamplaceStatus();
-      sendJson(res, 200, { ok: true, ...out });
+      sendJson(res, 200, {
+        ok: true,
+        ...out,
+        publish: streamplacePublishStatus(),
+      });
+      return;
+    }
+    // freeq / source → stream.place (inverse of /streamplace/play)
+    if (req.method === "POST" && url.pathname === "/streamplace/publish") {
+      const body = await readJson(req);
+      const out = await startStreamplacePublish(body);
+      sendJson(res, 200, out);
+      return;
+    }
+    if (
+      req.method === "POST" &&
+      (url.pathname === "/streamplace/publish/stop" ||
+        url.pathname === "/streamplace/unpublish")
+    ) {
+      const out = stopStreamplacePublish();
+      sendJson(res, 200, out);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/streamplace/publish/status") {
+      sendJson(res, 200, { ok: true, ...streamplacePublishStatus() });
       return;
     }
     // Push path from eve-av-bridge (RADIO_TITLE_HOOK) or tooling.
@@ -2251,5 +2911,5 @@ if (STREAMPLACE_AUTO) {
 }
 
 log(
-  `running preferredNick=${IRC_NICK} channel=${IRC_CHANNEL} requireAuth=${requireAuth} eve=${EVE_URL} inbound=${INBOUND_PATH} out=${OUT_SSE_PATH} avBridge=${AV_BRIDGE_URL} streamplace=${STREAMPLACE_AV_BRIDGE_URL} auto=${STREAMPLACE_AUTO} radioAnnounce=${RADIO_ANNOUNCE} contextLines=${CONTEXT_LINES}`,
+  `running preferredNick=${IRC_NICK} channel=${IRC_CHANNEL} requireAuth=${requireAuth} eve=${EVE_URL} inbound=${INBOUND_PATH} out=${OUT_SSE_PATH} avBridge=${AV_BRIDGE_URL} streamplace=${STREAMPLACE_AV_BRIDGE_URL} auto=${STREAMPLACE_AUTO} publishKey=${STREAMPLACE_STREAM_KEY ? "set" : "missing"} rtmp=${STREAMPLACE_RTMP_URL} radioAnnounce=${RADIO_ANNOUNCE} contextLines=${CONTEXT_LINES}`,
 );

@@ -127,3 +127,32 @@ curl -sS -X POST http://127.0.0.1:8791/streamplace/stop
 
 Picks `place.stream.live.getLiveUsers` sorted by `viewerCount`, plays HLS via
 `place.stream.playback.getLivePlaylist?streamer=<did>` through ffmpeg → MoQ.
+
+### stream.place publish plane (inverse / call rebroadcast)
+
+Egress only: freeq radio / a media URL → **RTMP** into stream.place (not a freeq
+MoQ attach). Managed by **irc-bridge** via ffmpeg; can run while a freeq plane
+is live.
+
+| Endpoint | Role |
+|----------|------|
+| `POST /streamplace/publish` | default **call mix** (freeq room → RTMP); or `mode:audio|av` + url |
+| `POST /streamplace/publish/stop` | stop ffmpeg publish |
+| `GET /streamplace/publish/status` | publishing?, pid, source |
+
+Config in `~/.config/eve/config.env` (mode `0600`):
+
+```bash
+STREAMPLACE_STREAM_KEY=…          # Live Dashboard → Generate Stream Key
+STREAMPLACE_RTMP_URL=rtmps://stream.place:1935/live   # default
+STREAMPLACE_PUBLISH_HANDLE=eve.boxd.sh                # optional notice URL
+```
+
+```bash
+# after freeq radio is playing:
+curl -sS -X POST http://127.0.0.1:8791/streamplace/publish \
+  -H 'content-type: application/json' -d '{}'
+curl -sS http://127.0.0.1:8791/streamplace/publish/status | jq .
+```
+
+Channel: `eve: go live` / `eve: stop live`. Tool: `publish_stream`.

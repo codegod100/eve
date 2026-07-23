@@ -4,8 +4,8 @@
 
 - **Model**: OpenCode Zen `deepseek-v4-flash-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + IRC via **irc-bridge** (POST `/irc/inbound` + SSE `/irc/out`)
-- **AV (optional)**: **av-bridge** (Rust) — freeq MoQ media plane + internet radio (`av-bridge/`, freeq `eve-av-bridge`)
-- **Tools**: cowsay, ATProto, rook/thermals, Anna, Linear (eve project), `guess_emotion`, **`play_radio` / `stop_radio`** (stream to freeq AV), **`memory_bank_add` / `memory_bank_list`** (durable song/note list)
+- **AV (optional)**: **av-bridge** (Rust) — freeq MoQ media planes + internet radio (`av-bridge/`, freeq `eve-av-bridge`); stream.place **watch** (`:8792`) and **publish** (RTMP egress)
+- **Tools**: cowsay, ATProto, rook/thermals, Anna, Linear (eve project), `guess_emotion`, **`play_radio` / `stop_radio`** (stream to freeq AV), **`watch_stream` / `publish_stream`** (stream.place in/out), **`memory_bank_add` / `memory_bank_list`** (durable song/note list)
 - **Skills**: `vit`, `vit-request-watch`, `anna`, `linear`, `freeq-irc`, `irc-backlog`, `embody-emotion`, **`freeq-radio`**
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed

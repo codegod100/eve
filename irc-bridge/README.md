@@ -50,6 +50,12 @@ node irc-bridge/server.mjs
 | `FREEQ_API_BASE` | REST for session discovery (default `https://<IRC_HOST>`) |
 | `RADIO_ANNOUNCE` | `1` (default) — PRIVMSG when ICY song title changes |
 | `RADIO_ANNOUNCE_MS` | poll interval for title changes (default `2000`) |
+| `STREAMPLACE_AV_BRIDGE_URL` | watch plane av-bridge (default `http://127.0.0.1:8792`) |
+| `STREAMPLACE_API` | stream.place XRPC base (default `https://stream.place`) |
+| `STREAMPLACE_AUTO` | `1` = restore/watch on boot |
+| `STREAMPLACE_RTMP_URL` | publish ingest base (default `rtmps://stream.place:1935/live`) |
+| `STREAMPLACE_STREAM_KEY` | required for **publish** (from stream.place dashboard) |
+| `STREAMPLACE_PUBLISH_HANDLE` | optional public handle for go-live notices |
 
 ### Control HTTP (eve tools)
 
@@ -59,8 +65,15 @@ node irc-bridge/server.mjs
 | `/radio/play` | `{ url, channel?, title? }` | ensure AV + stream radio |
 | `/radio/stop` | | stop decode |
 | `/radio/now-playing` | `{ title, channel? }` | announce song (from av-bridge `RADIO_TITLE_HOOK` or tooling) |
+| `/streamplace/play` | `{ streamer?, channel? }` | stream.place → freeq MoQ (watch plane) |
+| `/streamplace/stop` | | stop watch plane |
+| `/streamplace/publish` | `{ url?, title?, mode?, channel? }` | freeq/URL → stream.place RTMP (inverse) |
+| `/streamplace/publish/stop` | | stop RTMP publish |
+| GET `/streamplace/status` | | watch plane + publish status |
+| GET `/streamplace/publish/status` | | publish plane only |
 
-Needs **eve-av-bridge** running with **ffmpeg** for radio.
+Needs **eve-av-bridge** running with **ffmpeg** for radio / watch. Publish uses
+**ffmpeg** in this process (RTMP egress).
 
 ### Now-playing (song changes)
 
@@ -85,3 +98,7 @@ Two paths (deduped):
 |---------|--------|
 | `eve: watch https://stream.place/<handle>` | switch stream.place rebroadcast to that streamer |
 | `eve: watch <handle>` / `eve: watch did:plc:…` | same |
+| `eve: go live` | publish active freeq radio source → stream.place RTMP |
+| `eve: go live <url>` | publish that URL → stream.place |
+| `eve: go live av <url>` | re-encode source video+audio (default is audio+slate) |
+| `eve: stop live` | stop stream.place publish |
