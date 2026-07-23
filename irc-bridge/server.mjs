@@ -633,6 +633,74 @@ class IrcClient {
     return this.freeqSession;
   }
 
+  /**
+   * True when the live IRC session is usable (SASL ok, preferred nick, joined).
+   * Token rotation does not require dropping a healthy socket — SASL only runs
+   * at connect; connect() always re-reads the freeq session file.
+   */
+  isIrcHealthy() {
+    if (!this.joined || !this.saslOk) return false;
+    if (isGuestNick(this.nick)) return false;
+    if (this.preferredNickAbandoned) return true;
+    return this.nickMatchesPreferred();
+  }
+
+  /**
+   * Reload freeq session from disk. Soft-reconnect only when unhealthy (or force).
+   * Keeps a good #channel + AV binding intact across access-token rotation.
+   *
+   * @param {{ force?: boolean, reason?: string }} [opts]
+   */
+  reloadSession(opts = {}) {
+    const force = Boolean(opts.force);
+    const reason = opts.reason ?? "session-reload";
+    const before = {
+      healthy: this.isIrcHealthy(),
+      nick: this.nick,
+      saslOk: Boolean(this.saslOk),
+      joined: Boolean(this.joined),
+      hadSession: Boolean(this.freeqSession?.access_token),
+    };
+    const session = this.refreshSession();
+    const afterFp = session?.access_token
+      ? crypto
+          .createHash("sha256")
+          .update(session.access_token)
+          .digest("hex")
+          .slice(0, 12)
+      : null;
+    const healthy = this.isIrcHealthy();
+    if (force || !healthy) {
+      log(
+        `session reload → soft reconnect (${force ? "force" : "unhealthy"}) reason=${reason} fp=${afterFp ?? "none"}`,
+      );
+      this.forceReconnect(reason, force ? 1_000 : 2_000);
+      return {
+        ok: true,
+        reconnected: true,
+        force,
+        reason,
+        before,
+        session: session
+          ? { did: session.did, handle: session.handle, tokenFp: afterFp }
+          : null,
+      };
+    }
+    log(
+      `session reload → disk refreshed, IRC left up (healthy nick=${this.nick}) fp=${afterFp ?? "none"}`,
+    );
+    return {
+      ok: true,
+      reconnected: false,
+      force: false,
+      reason,
+      before,
+      session: session
+        ? { did: session.did, handle: session.handle, tokenFp: afterFp }
+        : null,
+    };
+  }
+
   nickMatchesPreferred(nick = this.nick) {
     return (
       String(nick ?? "").toLowerCase() ===
@@ -3142,6 +3210,7 @@ const controlServer = http.createServer(async (req, res) => {
         nick: irc.nick,
         saslOk: Boolean(irc.saslOk),
         joined: Boolean(irc.joined),
+        healthy: irc.isIrcHealthy(),
         channel: IRC_CHANNEL,
         radioBridge: RADIO_AV_BRIDGE_URL,
         streamWatchBridge: STREAM_WATCH_AV_BRIDGE_URL,
@@ -3152,6 +3221,26 @@ const controlServer = http.createServer(async (req, res) => {
         streamplacePublish: streamplacePublishStatus(),
         activePlanes: activePlanesSnapshot(),
       });
+      return;
+    }
+    // freeq session.json was rewritten (timer / operator). Reload from disk;
+    // soft-reconnect only if IRC is unhealthy or body.force / ?force=1.
+    if (req.method === "POST" && url.pathname === "/session/reload") {
+      let body = {};
+      try {
+        body = await readJson(req);
+      } catch {
+        body = {};
+      }
+      const qForce =
+        url.searchParams.get("force") === "1" ||
+        url.searchParams.get("force") === "true";
+      const force = Boolean(body.force) || qForce;
+      const reason =
+        (typeof body.reason === "string" && body.reason.trim()) ||
+        "session-reload";
+      const out = irc.reloadSession({ force, reason });
+      sendJson(res, 200, out);
       return;
     }
     if (req.method === "POST" && url.pathname === "/av/ensure") {

@@ -93,18 +93,29 @@ node /home/boxd/my-agent/scripts/sync-freeq-session.mjs
 
 If the script is missing, equivalent logic: read `identity.session.json` → take `access_token` + `dpopJwk.d` → write the freeq session files above (mode `0600`) → verify with DPoP `GET {pds}/xrpc/com.atproto.server.getSession` expecting HTTP 200.
 
-### 3. Restart **irc-bridge** (and eve if needed)
+### 3. Soft-reload session (prefer) or restart bridge
 
 IRC sockets live in `irc-bridge/server.mjs`, not in the eve process.
+Token refresh should **not** process-restart the bridge when IRC is healthy —
+that drops AV / watch. Soft-reload re-reads session.json and only reconnects
+if SASL/join is broken.
 
 ```bash
-# preferred: systemd user unit (keeps eve up)
-systemctl --user restart eve-irc-bridge.service
-journalctl --user -u eve-irc-bridge.service -n 30 --no-pager
+# preferred: soft reload (no process restart)
+curl -sS -X POST http://127.0.0.1:8791/session/reload \
+  -H 'content-type: application/json' \
+  -d '{"reason":"operator-sasl-fix"}'
+# or force a reconnect even when healthy:
+# curl -sS -X POST 'http://127.0.0.1:8791/session/reload?force=1'
 
-# full stack refresh (prep + eve + bridge):
-systemctl --user start eve-prep.service
-systemctl --user restart eve.service eve-irc-bridge.service
+# timer path (same soft reload, every 5m when unit is enabled):
+systemctl --user start eve-freeq-session-refresh.service
+tail -n 20 ~/logs/freeq-session-refresh.log
+
+# only if the bridge process itself is wedged:
+systemctl --user restart eve-irc-bridge.service
+# logs (journal may be empty on boxd — file log is authoritative):
+tail -n 40 ~/logs/irc-bridge.log
 
 # legacy (no units): kill old bridge pid if any, then:
 EVE_URL=http://127.0.0.1:8000 nohup node irc-bridge/server.mjs >> /tmp/irc-bridge.log 2>&1 &
@@ -116,8 +127,7 @@ Success in bridge log: `SASL success as did:plc:…` and `joined #test as eve`, 
 ### 4. One-liner (from laptop)
 
 ```bash
-boxd exec eve -- bash -lc 'npx --yes @solpbc/rook login && node /home/boxd/my-agent/scripts/sync-freeq-session.mjs && echo synced'
-# then restart agent (step 3)
+boxd exec eve -- bash -lc 'npx --yes @solpbc/rook login && node /home/boxd/my-agent/scripts/sync-freeq-session.mjs && curl -sS -X POST http://127.0.0.1:8791/session/reload -H "content-type: application/json" -d "{\"reason\":\"laptop-fix\"}"'
 ```
 
 ## Do not
@@ -129,8 +139,9 @@ boxd exec eve -- bash -lc 'npx --yes @solpbc/rook login && node /home/boxd/my-ag
 
 ## Prevention
 
-- Access tokens expire ~hours. On boot, `eve-prep.service` / `scripts/prep.sh` runs `rook login` + `sync-freeq-session.mjs` before agent and bridge.
-- After **hibernate → wake**, TCP to freeq is often half-dead: `systemctl --user restart eve-irc-bridge.service` even if tokens are still valid.
+- Access tokens expire ~hours. Keep `eve-freeq-session-refresh.timer` **enabled** — it writes fresh session.json and soft-notifies the bridge; it does **not** restart the process on every rotation.
+- On boot, `eve-prep.service` / `scripts/prep.sh` runs `rook login` + `sync-freeq-session.mjs` before agent and bridge.
+- After **hibernate → wake**, TCP to freeq is often half-dead: `curl -X POST http://127.0.0.1:8791/session/reload -d '{"force":true}'` (or restart the unit if control HTTP is dead).
 - Keep `openbao` reachable if keys come from OpenBao at prep (`~/.config/eve/openbao.env`).
 - `IRC_REQUIRE_AUTH` defaults on for freeq hosts: bridge will not sit in `#test` as `Guest*`; it reconnects until SASL lands `eve`.
 

@@ -54,13 +54,19 @@ journalctl --user -u eve.service -u eve-irc-bridge.service -f
 ```bash
 npx --yes @solpbc/rook login
 node scripts/sync-freeq-session.mjs
-systemctl --user restart eve-irc-bridge.service
+# prefer soft reload (no process restart — preserves AV / watch):
+curl -sS -X POST http://127.0.0.1:8791/session/reload \
+  -H 'content-type: application/json' \
+  -d '{"reason":"operator-sasl-fix"}'
+# only if the bridge process itself is wedged:
+# systemctl --user restart eve-irc-bridge.service
 ```
 
 
 ### freeq SASL session refresh (systemd timer)
 
-Access tokens are short-lived. The timer keeps IRC SASL working:
+Access tokens are short-lived. The timer keeps freeq session files fresh
+**without** restarting the IRC bridge on every rotation:
 
 ```bash
 systemctl --user status eve-freeq-session-refresh.timer
@@ -70,8 +76,11 @@ tail -f ~/logs/freeq-session-refresh.log
 ```
 
 `scripts/refresh-freeq-session.sh` runs `rook login --json`, writes freeq
-session files via `sync-freeq-session.mjs`, then `try-restart`s
-`eve-irc-bridge.service` so the bridge re-SASLs without a Guest nick.
+session files via `sync-freeq-session.mjs`, then `POST`s
+`http://127.0.0.1:8791/session/reload`. The bridge reloads the session from
+disk and **only soft-reconnects** if IRC is unhealthy (SASL fail / not
+joined). A healthy `#channel` + AV binding is left alone — SASL only runs at
+connect, and `connect()` always re-reads the session file.
 
 If refresh fails with an expired rook session, re-auth once:
 

@@ -2,9 +2,13 @@
 # Refresh rook OAuth → freeq SASL session files.
 # Invoked by systemd user timer: eve-freeq-session-refresh.timer
 #
-# Does NOT restart the IRC bridge on every tick — that was re-firing
-# STREAMPLACE_AUTO and clobbering a user `watch` with the top-viewers stream.
-# Restart only when the freeq access_token actually changes.
+# Design:
+#   - Always write a fresh freeq session.json to disk (tokens are short-lived).
+#   - Never systemctl-restart the IRC bridge on token rotation — that drops the
+#     freeq TCP session and thrashs AV / STREAMPLACE_AUTO / watch state.
+#   - SASL only runs at IRC connect; connect() re-reads the session file.
+#   - Soft-notify the bridge control HTTP: reload in-memory session; only
+#     soft-reconnect if IRC is currently unhealthy (SASL fail / not joined).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,6 +21,9 @@ mkdir -p "$LOG_DIR"
 LOG="${FREEQ_SESSION_REFRESH_LOG:-$LOG_DIR/freeq-session-refresh.log}"
 
 SESSION_FILE="${IRC_FREEQ_SESSION:-$HOME/.config/freeq-tui/eve.boxd.sh.session.json}"
+CONTROL_HOST="${IRC_CONTROL_HOST:-127.0.0.1}"
+CONTROL_PORT="${IRC_CONTROL_PORT:-8791}"
+CONTROL_URL="http://${CONTROL_HOST}:${CONTROL_PORT}/session/reload"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -38,6 +45,27 @@ token_fp() {
       process.stdout.write("unreadable");
     }
   ' "$f" 2>/dev/null || echo "unreadable"
+}
+
+# Soft-notify bridge: reload session from disk; reconnect only if unhealthy.
+notify_bridge() {
+  local reason="$1"
+  local body
+  body="$(printf '{"reason":%s}' "$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$reason")")"
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "[$(ts)] bridge notify skipped — curl not on PATH"
+    return 0
+  fi
+  local resp
+  if resp="$(curl -sS -m 5 -X POST \
+    -H 'content-type: application/json' \
+    -d "$body" \
+    "$CONTROL_URL" 2>&1)"; then
+    echo "[$(ts)] bridge /session/reload → $resp"
+  else
+    echo "[$(ts)] bridge /session/reload failed (bridge down?) — $resp"
+    echo "[$(ts)] disk session is still fresh; next IRC connect will pick it up"
+  fi
 }
 
 {
@@ -64,16 +92,11 @@ token_fp() {
   echo "[$(ts)] token_fp before=$before after=$after"
 
   if [ "$before" != "$after" ]; then
-    # Bridge reloads session on each connect; bounce only when token rotated so
-    # a mid-session expiry can pick up the new SASL material promptly.
-    if systemctl --user is-active eve-irc-bridge.service >/dev/null 2>&1; then
-      systemctl --user try-restart eve-irc-bridge.service
-      echo "[$(ts)] token changed — restarted eve-irc-bridge.service"
-    else
-      echo "[$(ts)] token changed — irc-bridge not active, skip restart"
-    fi
+    echo "[$(ts)] token changed — disk updated (no process restart)"
+    notify_bridge "token-rotated"
   else
-    echo "[$(ts)] token unchanged — leave irc-bridge running (preserves watch / AV)"
+    echo "[$(ts)] token unchanged — still notify bridge in case IRC is unhealthy"
+    notify_bridge "token-unchanged"
   fi
 
   echo "[$(ts)] refresh ok"

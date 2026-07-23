@@ -73,6 +73,7 @@ releases the other planes (`exclusivePlane`).
 
 | POST | body | action |
 |------|------|--------|
+| `/session/reload` | `{ force?, reason? }` | reload freeq session.json from disk; soft-reconnect **only** if IRC is unhealthy (or `force: true`) — does not process-restart |
 | `/av/ensure` | `{ channel?, title? }` | av_start/join + connect media |
 | `/radio/play` | `{ url, channel?, title? }` | ensure AV + stream radio |
 | `/radio/stop` | | stop decode |
@@ -81,8 +82,16 @@ releases the other planes (`exclusivePlane`).
 | `/streamplace/stop` | | stop watch plane |
 | `/streamplace/publish` | `{ url?, title?, mode?, channel? }` | freeq/URL → stream.place RTMP (inverse) |
 | `/streamplace/publish/stop` | | stop RTMP publish |
+| GET `/health` | | nick, `saslOk`, `joined`, `healthy`, plane snapshot |
 | GET `/streamplace/status` | | watch plane + publish status |
 | GET `/streamplace/publish/status` | | publish plane only |
+
+**Token refresh vs IRC restart:** the freeq OAuth access token is only used at
+SASL (connect time). Keep `~/.config/freeq-tui/eve.boxd.sh.session.json` fresh
+via `eve-freeq-session-refresh.timer`. Do **not** restart the bridge process
+just because the token rotated — that drops the freeq TCP session and thrashs
+AV. Prefer `POST /session/reload`; use `force: true` only when you need a
+deliberate re-auth while healthy.
 
 Needs **eve-av-bridge** running with **ffmpeg** for radio / watch. Publish uses
 **ffmpeg** in this process (RTMP egress).
