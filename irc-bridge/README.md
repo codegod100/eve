@@ -66,7 +66,8 @@ node irc-bridge/server.mjs
 | stream-watch | `:8792` | stream.place HLS → freeq | `/v1/watch/*` |
 | stream-broadcast | `:8793` | freeq call → stream.place RTMP | `/v1/call-egress/*` |
 
-`ensureAv` only leaves/reconnects the bridge you asked for.
+Only **one** freeq tile plays at a time: starting radio, watch, or broadcast
+releases the other planes (`exclusivePlane`).
 
 ### Control HTTP (eve tools)
 

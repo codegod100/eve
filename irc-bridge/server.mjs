@@ -1540,9 +1540,9 @@ process.on("SIGINT", () => {
 // ---------------------------------------------------------------------------
 // AV ensure + radio (orchestrates TAGMSG + eve-av-bridge)
 // ---------------------------------------------------------------------------
-// freeq allows multiple MoQ publishers. We keep up to one attachment *per bridge*:
+// Three MoQ planes (separate bridges, separate APIs):
 //   :8790 radio | :8792 stream-watch | :8793 stream-broadcast
-// Planes must not tear each other down or share play APIs.
+// Only ONE freeq tile is live at a time — starting a plane releases the others.
 
 /**
  * @typedef {{ bridgeUrl: string, sessionId: string, instance: string, nick: string, channel: string }} AvPlane
@@ -1640,6 +1640,24 @@ async function releasePlane(bridgeUrl) {
 async function releaseAllPlanes() {
   const urls = new Set([...knownPlaneUrls(), ...activePlanes.keys()]);
   for (const url of urls) {
+    await releasePlane(url);
+  }
+}
+
+/**
+ * Ensure only one freeq tile is playing: release every plane except `keepBridge`.
+ * Call before radio / stream-watch / stream-broadcast start.
+ * @param {string} keepBridge
+ */
+async function exclusivePlane(keepBridge) {
+  const keep = planeKey(keepBridge);
+  log(`exclusive plane keep=${keep}`);
+  // Leaving broadcast → stop RTMP publish bookkeeping (call-egress stop via release).
+  if (keep !== planeKey(STREAM_BROADCAST_AV_BRIDGE_URL) && streamplacePublish) {
+    stopStreamplacePublish();
+  }
+  for (const url of knownPlaneUrls()) {
+    if (url === keep) continue;
     await releasePlane(url);
   }
 }
@@ -2209,6 +2227,9 @@ async function playStreamplace({ channel, streamer } = {}) {
   const title = `stream.place: ${picked.title} (@${picked.handle}, ${picked.viewers ?? "?"} viewers)`;
   log(`streamplace play ${title} → ${ch} plane=${STREAMPLACE_AV_BRIDGE_URL}`);
 
+  // One freeq tile only — drop radio + broadcast.
+  await exclusivePlane(STREAM_WATCH_AV_BRIDGE_URL);
+
   let av;
   try {
     av = await ensureAv(ch, title.slice(0, 120), STREAMPLACE_AV_BRIDGE_URL);
@@ -2560,6 +2581,8 @@ async function startStreamplacePublish({ url, title, channel, mode } = {}) {
     log(
       `stream-broadcast CALL → ${ch} plane=${STREAM_BROADCAST_AV_BRIDGE_URL} rtmp=${redactRtmp(rtmp)}`,
     );
+    // One freeq tile only — drop radio + stream-watch.
+    await exclusivePlane(STREAM_BROADCAST_AV_BRIDGE_URL);
     let av;
     try {
       // Broadcast plane only — never radio or stream-watch.
@@ -2983,9 +3006,11 @@ async function playRadio({ url, channel, title }) {
   radioAnnounceChannel = ch.startsWith("#") ? ch : `#${ch}`;
   // Fresh stream — allow the first ICY title to be announced again.
   lastRadioTitle = null;
+  // One freeq tile only — drop stream-watch + broadcast.
+  await exclusivePlane(RADIO_AV_BRIDGE_URL);
   let av;
   try {
-    av = await ensureAv(ch, title ?? "eve radio");
+    av = await ensureAv(ch, title ?? "eve radio", RADIO_AV_BRIDGE_URL);
   } catch (e) {
     // Media may already be up from a prior call; still try play.
     log(
