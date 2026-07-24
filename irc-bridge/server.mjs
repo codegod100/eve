@@ -2182,28 +2182,53 @@ function parseStreamplaceTarget(raw) {
 }
 
 /**
- * Fast-path: `watch <url|handle|did>` from a mention/DM — flip stream.place plane.
+ * Fast-path: `watch <url|handle|did>` (and close variants) from a mention/DM —
+ * flip stream.place plane without an agent round-trip.
  * @returns {boolean} true if handled (caller should not forward to eve agent)
  */
 function tryHandleWatch(ircClient, replyTarget, channel, body) {
-  const m = String(body ?? "").match(/^watch(?:\s+|:\s*)(.+)$/i);
-  if (!m) return false;
-  const streamer = parseStreamplaceTarget(m[1]);
-  if (!streamer) {
+  const raw = String(body ?? "").trim();
+  if (!raw) return false;
+
+  /** @type {string | null} */
+  let streamer = null;
+
+  // `watch <target>` / `watch: <target>` / `watch <target> please…`
+  let m = raw.match(/^watch(?:\s+|:\s*)(\S+)/i);
+  if (m) {
+    streamer = parseStreamplaceTarget(m[1]);
+  }
+  // Bare `watch` → restore last pref, else top live (playStreamplace handles empty).
+  if (!streamer && /^watch\s*$/i.test(raw)) {
+    streamer = loadStreamplacePref()?.streamer || undefined;
+    // empty string signal → playStreamplace picks top live when streamer omitted
+    if (!streamer) streamer = "";
+  }
+  // `watch stream.place/x` without scheme, or pasted URL as whole body after watch word
+  if (streamer === null && /^watch\b/i.test(raw)) {
+    const rest = raw.replace(/^watch(?:\s+|:\s*)?/i, "").trim();
+    if (rest) streamer = parseStreamplaceTarget(rest.split(/\s+/)[0]);
+  }
+  // Not a watch command at all
+  if (streamer === null && !/^watch\b/i.test(raw)) return false;
+  if (streamer === null) {
     ircClient.sendPrivmsg(
       replyTarget,
       "usage: watch <https://stream.place/handle | handle | did:plc:…>",
     );
     return true;
   }
+
   const ch = channel || IRC_CHANNEL;
   void (async () => {
     try {
-      log(`watch command → ${streamer} on ${ch}`);
-      const out = await playStreamplace({ channel: ch, streamer });
-      const handle = out.stream?.handle ?? streamer;
+      log(`watch command → ${streamer || "(top/pref)"} on ${ch}`);
+      const out = await playStreamplace({
+        channel: ch,
+        streamer: streamer || undefined,
+      });
+      const handle = out.stream?.handle ?? streamer ?? "?";
       const title = out.stream?.title ?? handle;
-      // playStreamplace already PRIVMSGs a notice; short ack is enough if that failed.
       log(
         `watch ok @${handle} title=${String(title).slice(0, 60)} session=${out.av?.sessionId ?? "?"}`,
       );
