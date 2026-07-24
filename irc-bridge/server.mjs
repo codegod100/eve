@@ -738,8 +738,12 @@ class IrcClient {
       const waiters = this.avWaiters.get(key) ?? [];
       for (const r of waiters) r(sessionId);
       this.avWaiters.delete(key);
+      // Humans often open a *new* freeq room mid-watch; kick follow so we
+      // don't keep publishing into a zombie session only eve is in.
+      onAvRoomActivity(channel, sessionId, action);
     } else if (action === "ended") {
       this.avByChannel.delete(key);
+      onAvRoomActivity(channel, sessionId, action);
     }
   }
 
@@ -2321,6 +2325,7 @@ async function playStreamplace({ channel, streamer } = {}) {
   log(`streamplace play ${title} → ${ch} plane=${STREAMPLACE_AV_BRIDGE_URL}`);
 
   // One freeq tile only — drop radio + broadcast.
+  stopMediaFollow("playStreamplace exclusive");
   await exclusivePlane(STREAM_WATCH_AV_BRIDGE_URL);
 
   let av;
@@ -2345,9 +2350,10 @@ async function playStreamplace({ channel, streamer } = {}) {
     throw new Error(json.error || `streamplace radio play ${res.status}`);
   }
 
-  // freeq clients often open a *new* voice room while eve sits on an older
-  // Active session — follow humans onto channel.active for ~30s after watch.
-  scheduleFollowHumanSession({
+  // Keep following freeq rooms for the whole watch lifetime (not just ~30s).
+  // freeq clients thrash rooms; without this, eve ends alone in a zombie
+  // Active session while humans sit in a new room with silence.
+  startMediaFollow({
     channel: ch,
     bridgeUrl: STREAMPLACE_AV_BRIDGE_URL,
     title: title.slice(0, 120),
@@ -2374,50 +2380,129 @@ async function playStreamplace({ channel, streamer } = {}) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Continuous freeq-room follow while radio/watch media is intended to play.
+// ---------------------------------------------------------------------------
+
+/** @type {{ channel: string, bridgeUrl: string, title?: string, radioUrl?: string } | null} */
+let followMedia = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let followHumanTimer = null;
 /** @type {number} */
 let followHumanGen = 0;
+/** @type {boolean} */
+let followInFlight = false;
+/** @type {boolean} */
+let followMigrating = false;
+/** Last preferred session id we observed (stability debounce). */
+let followCandidateId = null;
+/** Consecutive polls seeing the same preferred room with humans. */
+let followCandidateHits = 0;
+/** @type {number} */
+let lastFollowMigrateAt = 0;
+
+const FOLLOW_POLL_MS = 4_000;
+const FOLLOW_KICK_MS = 800;
+const FOLLOW_STABLE_HITS = 2; // ~8s of a stable human room before migrate
+const FOLLOW_MIGRATE_COOLDOWN_MS = 10_000;
 
 /**
- * If a human opens a different freeq room on this channel, move this bridge
- * (and re-start radio URL) so their UI sees eve's tile.
+ * Start (or replace) continuous room-follow while this media should play.
  * @param {{ channel: string, bridgeUrl: string, title?: string, radioUrl?: string }} opts
  */
-function scheduleFollowHumanSession(opts) {
+function startMediaFollow(opts) {
+  followMedia = {
+    channel: opts.channel,
+    bridgeUrl: planeKey(opts.bridgeUrl),
+    title: opts.title,
+    radioUrl: opts.radioUrl,
+  };
+  followCandidateId = null;
+  followCandidateHits = 0;
+  followHumanGen += 1;
+  log(
+    `media follow: start plane=${followMedia.bridgeUrl} ch=${followMedia.channel}`,
+  );
+  scheduleFollowTick(FOLLOW_KICK_MS);
+}
+
+/** Stop continuous follow (explicit media stop / plane release). */
+function stopMediaFollow(reason = "stop") {
+  if (!followMedia && !followHumanTimer) return;
+  log(`media follow: stop (${reason})`);
+  followMedia = null;
+  followCandidateId = null;
+  followCandidateHits = 0;
+  followHumanGen += 1;
   if (followHumanTimer) {
     clearTimeout(followHumanTimer);
     followHumanTimer = null;
   }
-  const gen = ++followHumanGen;
-  let attempts = 0;
-  const tick = () => {
-    void (async () => {
-      if (gen !== followHumanGen) return;
-      attempts += 1;
-      try {
-        const moved = await tryFollowHumanSession(opts);
-        if (moved) {
-          log(
-            `follow human session: migrated plane ${opts.bridgeUrl} → human room`,
-          );
-          return;
-        }
-      } catch (e) {
-        log(`follow human session: ${e instanceof Error ? e.message : e}`);
-      }
-      if (gen !== followHumanGen) return;
-      if (attempts < 15) {
-        followHumanTimer = setTimeout(tick, 2_000);
-        followHumanTimer.unref?.();
-      }
-    })();
-  };
-  followHumanTimer = setTimeout(tick, 1_500);
+}
+
+/**
+ * av-state activity (started/joined/ended) — re-check whether we should move.
+ * @param {string} _channel
+ * @param {string} _sessionId
+ * @param {string} action
+ */
+function onAvRoomActivity(_channel, _sessionId, action) {
+  if (!followMedia || followMigrating) return;
+  if (action === "started" || action === "joined" || action === "ended") {
+    scheduleFollowTick(FOLLOW_KICK_MS);
+  }
+}
+
+/**
+ * @param {number} [delayMs]
+ */
+function scheduleFollowTick(delayMs = FOLLOW_POLL_MS) {
+  if (!followMedia) return;
+  if (followHumanTimer) {
+    clearTimeout(followHumanTimer);
+    followHumanTimer = null;
+  }
+  const gen = followHumanGen;
+  followHumanTimer = setTimeout(() => {
+    followHumanTimer = null;
+    void runFollowTick(gen);
+  }, delayMs);
   followHumanTimer.unref?.();
 }
 
 /**
+ * @param {number} gen
+ */
+async function runFollowTick(gen) {
+  if (gen !== followHumanGen || !followMedia) return;
+  if (followInFlight || followMigrating) {
+    scheduleFollowTick(FOLLOW_POLL_MS);
+    return;
+  }
+  followInFlight = true;
+  try {
+    const moved = await tryFollowHumanSession(followMedia);
+    if (moved) {
+      log(
+        `follow human session: migrated plane ${followMedia.bridgeUrl} → human room`,
+      );
+    }
+  } catch (e) {
+    log(`follow human session: ${e instanceof Error ? e.message : e}`);
+  } finally {
+    followInFlight = false;
+    if (gen === followHumanGen && followMedia) {
+      scheduleFollowTick(FOLLOW_POLL_MS);
+    }
+  }
+}
+
+/**
+ * If a human opens a different freeq room on this channel, move this bridge
+ * (and re-start radio/watch URL) so their UI sees eve's tile.
+ *
+ * Stability + cooldown avoid thrashing on 1–3s throwaway rooms.
+ *
  * @param {{ channel: string, bridgeUrl: string, title?: string, radioUrl?: string }} opts
  * @returns {Promise<boolean>} true if we migrated
  */
@@ -2425,7 +2510,11 @@ async function tryFollowHumanSession({ channel, bridgeUrl, title, radioUrl }) {
   const ch = channel.startsWith("#") ? channel : `#${channel}`;
   const bridge = planeKey(bridgeUrl);
   const preferred = await discoverActiveSession(ch);
-  if (!preferred) return false;
+  if (!preferred) {
+    followCandidateId = null;
+    followCandidateHits = 0;
+    return false;
+  }
 
   let current = activePlanes.get(bridge)?.sessionId ?? null;
   if (!current) {
@@ -2438,46 +2527,83 @@ async function tryFollowHumanSession({ channel, bridgeUrl, title, radioUrl }) {
       /* ignore */
     }
   }
-  if (current && current === preferred) return false;
+  if (current && current === preferred) {
+    followCandidateId = preferred;
+    followCandidateHits = FOLLOW_STABLE_HITS;
+    return false;
+  }
 
   // Only move when the preferred room has a non-us participant.
+  let others = 0;
   try {
     const roster = await fetchSessionRoster(preferred);
     const parts = Array.isArray(roster?.participants)
       ? roster.participants
       : [];
     const me = String(irc.nick || "").toLowerCase();
-    const others = parts.filter(
+    others = parts.filter(
       (p) => String(p?.nick ?? "").toLowerCase() !== me,
     ).length;
-    if (others === 0) return false;
+    if (others === 0) {
+      followCandidateId = null;
+      followCandidateHits = 0;
+      return false;
+    }
   } catch (e) {
     log(`follow roster: ${e instanceof Error ? e.message : e}`);
     return false;
   }
 
-  log(
-    `follow human session: ${current ?? "?"} → ${preferred} on ${bridge} (others present)`,
-  );
-  await ensureAv(ch, title || "stream.place", bridge, { force: true });
-  if (radioUrl) {
-    const isWatch = planeKey(bridge) === planeKey(STREAM_WATCH_AV_BRIDGE_URL);
-    const path = isWatch ? "/v1/watch/play" : "/v1/radio/play";
-    const res = await fetch(`${bridge}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: radioUrl }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok || json.ok === false) {
-      throw new Error(json.error || `follow ${path} HTTP ${res.status}`);
-    }
+  // Debounce ephemeral rooms (humans open/close freeq in under a few seconds).
+  if (followCandidateId === preferred) {
+    followCandidateHits += 1;
+  } else {
+    followCandidateId = preferred;
+    followCandidateHits = 1;
   }
-  return true;
+  if (followCandidateHits < FOLLOW_STABLE_HITS) {
+    log(
+      `follow human session: candidate ${preferred} others=${others} hits=${followCandidateHits}/${FOLLOW_STABLE_HITS} (wait)`,
+    );
+    return false;
+  }
+  if (Date.now() - lastFollowMigrateAt < FOLLOW_MIGRATE_COOLDOWN_MS) {
+    log(
+      `follow human session: cooldown — skip migrate to ${preferred} for now`,
+    );
+    return false;
+  }
+
+  log(
+    `follow human session: ${current ?? "?"} → ${preferred} on ${bridge} (others=${others})`,
+  );
+  followMigrating = true;
+  try {
+    await ensureAv(ch, title || "stream.place", bridge, { force: true });
+    if (radioUrl) {
+      const isWatch = planeKey(bridge) === planeKey(STREAM_WATCH_AV_BRIDGE_URL);
+      const path = isWatch ? "/v1/watch/play" : "/v1/radio/play";
+      const res = await fetch(`${bridge}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: radioUrl }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.ok === false) {
+        throw new Error(json.error || `follow ${path} HTTP ${res.status}`);
+      }
+    }
+    lastFollowMigrateAt = Date.now();
+    followCandidateHits = FOLLOW_STABLE_HITS;
+    return true;
+  } finally {
+    followMigrating = false;
+  }
 }
 
 async function stopStreamplace() {
+  stopMediaFollow("stopStreamplace");
   clearStreamplacePref();
   const plane = planeKey(STREAMPLACE_AV_BRIDGE_URL);
   // Only tear down the watch plane — radio/call on :8790 stays up.
@@ -3100,6 +3226,7 @@ async function playRadio({ url, channel, title }) {
   // Fresh stream — allow the first ICY title to be announced again.
   lastRadioTitle = null;
   // One freeq tile only — drop stream-watch + broadcast.
+  stopMediaFollow("playRadio exclusive");
   await exclusivePlane(RADIO_AV_BRIDGE_URL);
   let av;
   try {
@@ -3121,10 +3248,17 @@ async function playRadio({ url, channel, title }) {
   if (!res.ok || json.ok === false) {
     throw new Error(json.error || `radio play ${res.status}`);
   }
+  startMediaFollow({
+    channel: ch,
+    bridgeUrl: RADIO_AV_BRIDGE_URL,
+    title: title ?? "eve radio",
+    radioUrl: url,
+  });
   return { av, radio: json.radio };
 }
 
 async function stopRadio() {
+  stopMediaFollow("stopRadio");
   try {
     await fetch(`${RADIO_AV_BRIDGE_URL}/v1/radio/stop`, {
       method: "POST",
@@ -3386,7 +3520,34 @@ if (STREAMPLACE_AUTO) {
           return;
         }
         if (await streamplaceAlreadyPlaying()) {
-          log("streamplace auto: plane already playing — leave it alone");
+          // Attach continuous freeq-room follow without restarting demux.
+          try {
+            const st = await fetch(`${STREAMPLACE_AV_BRIDGE_URL}/v1/status`, {
+              signal: AbortSignal.timeout(3_000),
+            }).then((r) => r.json());
+            const pref = loadStreamplacePref();
+            const ch = st?.session?.channel || pref?.channel || IRC_CHANNEL;
+            const url = st?.watch?.url || null;
+            if (url) {
+              startMediaFollow({
+                channel: ch,
+                bridgeUrl: STREAMPLACE_AV_BRIDGE_URL,
+                title: "stream.place (resume)",
+                radioUrl: url,
+              });
+              log(
+                `streamplace auto: already playing — media follow attached on ${ch}`,
+              );
+            } else {
+              log(
+                "streamplace auto: plane already playing — leave it alone (no url)",
+              );
+            }
+          } catch (e) {
+            log(
+              `streamplace auto: already playing, follow attach failed: ${e instanceof Error ? e.message : e}`,
+            );
+          }
           return;
         }
         const pref = loadStreamplacePref();
