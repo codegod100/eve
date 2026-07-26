@@ -76,7 +76,8 @@ releases the other planes (`exclusivePlane`).
 | `/session/reload` | `{ force?, reason? }` | reload freeq session.json from disk; soft-reconnect **only** if IRC is unhealthy (or `force: true`) — does not process-restart |
 | `/av/ensure` | `{ channel?, title? }` | av_start/join + connect media |
 | `/radio/play` | `{ url, channel?, title? }` | ensure AV + stream radio |
-| `/radio/stop` | | stop decode |
+| `/radio/stop` | | stop radio decode only |
+| `/media/stop` | | stop **all** media (radio + watch + publish + release planes) |
 | `/radio/now-playing` | `{ title, channel? }` | announce song (from av-bridge `RADIO_TITLE_HOOK` or tooling) |
 | `/streamplace/play` | `{ streamer?, channel? }` | stream.place → freeq MoQ (watch plane) |
 | `/streamplace/stop` | | stop watch plane |
@@ -123,3 +124,4 @@ Two paths (deduped):
 | `eve: go live <url>` | publish that URL → stream.place |
 | `eve: go live av <url>` | re-encode source video+audio (default is audio+slate) |
 | `eve: stop live` | stop stream.place publish |
+| `eve: stop media` / `eve: stop all` | stop radio + watch + publish (all media) |

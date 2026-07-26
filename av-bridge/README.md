@@ -125,7 +125,7 @@ curl -X POST http://127.0.0.1:8791/radio/play \
   -d '{"url":"https://ice1.somafm.com/groovesalad-128-mp3"}'
 ```
 
-Eve tools: `play_radio` / `stop_radio` (skill `freeq-radio`).
+Eve tools: `play_radio` / `stop_radio` / `stop_media` (skill `freeq-radio`).
 
 ## Next
 

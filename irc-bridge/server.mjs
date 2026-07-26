@@ -1391,6 +1391,10 @@ class IrcClient {
       // Immediate 👀 so the user sees the bot accepted the mention.
       this.reactWorking(target, msgid);
       // Local slash-ish commands (no agent round-trip).
+      if (tryHandleStopMedia(this, target, target, body)) {
+        log(`stop-media command from ${from} in ${target}: ${body.slice(0, 80)}`);
+        return;
+      }
       if (tryHandleWatch(this, target, target, body)) {
         log(`watch command from ${from} in ${target}: ${body.slice(0, 80)}`);
         return;
@@ -1420,6 +1424,10 @@ class IrcClient {
     pushContext(from, from, text, { aliases });
     this.reactWorking(from, msgid);
     const dmBody = text.trim();
+    if (tryHandleStopMedia(this, from, IRC_CHANNEL, dmBody)) {
+      log(`stop-media command DM from ${from}: ${dmBody.slice(0, 80)}`);
+      return;
+    }
     if (tryHandleWatch(this, from, IRC_CHANNEL, dmBody)) {
       log(`watch command DM from ${from}: ${dmBody.slice(0, 80)}`);
       return;
@@ -3271,6 +3279,56 @@ async function stopRadio() {
   return { ok: true };
 }
 
+/**
+ * Stop every media plane: radio decode, stream.place watch, RTMP publish,
+ * continuous freeq-room follow, and release all MoQ attaches.
+ * Broader than stopRadio / stopStreamplace / stopStreamplacePublish alone.
+ */
+async function stopAllMedia() {
+  stopMediaFollow("stopAllMedia");
+  const pub = stopStreamplacePublish();
+  clearStreamplacePref();
+  lastRadioTitle = null;
+  await releaseAllPlanes();
+  log("all media stopped");
+  return {
+    ok: true,
+    stopped: true,
+    wasPublishing: Boolean(pub?.wasPublishing),
+    message: "all media stopped",
+  };
+}
+
+/**
+ * Fast-path: stop all media (radio + watch + publish) without an agent turn.
+ * Phrases: stop media, stop all, stop all media, kill media, silence all.
+ * Does not steal "stop radio" (agent tool) or "stop live" (publish-only).
+ * @returns {boolean} true if handled
+ */
+function tryHandleStopMedia(ircClient, replyTarget, _channel, body) {
+  const raw = String(body ?? "").trim();
+  if (
+    !/^(?:stop\s+all(?:\s+media)?|stop\s+media|stop\s+everything|kill\s+(?:all\s+)?media|silence\s+all)\b/i.test(
+      raw,
+    )
+  ) {
+    return false;
+  }
+  void (async () => {
+    try {
+      await stopAllMedia();
+      ircClient.sendPrivmsg(replyTarget, "stopped all media");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      ircClient.sendPrivmsg(
+        replyTarget,
+        `stop media failed: ${msg}`.slice(0, 350),
+      );
+    }
+  })();
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Now-playing: ICY title changes → channel PRIVMSG
 // ---------------------------------------------------------------------------
@@ -3416,6 +3474,17 @@ const controlServer = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/radio/stop") {
       const out = await stopRadio();
+      sendJson(res, 200, out);
+      return;
+    }
+    // Stop radio + stream.place watch + publish + release all MoQ planes.
+    if (
+      req.method === "POST" &&
+      (url.pathname === "/media/stop" ||
+        url.pathname === "/media/stop-all" ||
+        url.pathname === "/stop/all")
+    ) {
+      const out = await stopAllMedia();
       sendJson(res, 200, out);
       return;
     }

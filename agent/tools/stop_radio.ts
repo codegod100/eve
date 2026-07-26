@@ -6,8 +6,9 @@ const CONTROL =
 
 export default defineTool({
   description:
-    "Stop internet radio streaming on freeq AV (after play_radio). " +
-    "Use when the user says stop radio, kill the music, silence, or stop the stream.",
+    "Stop internet radio streaming on freeq AV only (after play_radio). " +
+    "Use when the user says stop radio, kill the music, or silence. " +
+    "For stop all media / stop everything (radio + watch + publish), use stop_media instead.",
   inputSchema: z.object({
     reason: z.string().optional().describe("Optional note for logs."),
   }),

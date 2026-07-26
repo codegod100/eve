@@ -95,9 +95,10 @@ You are invoked **only** when someone mentions you (or DMs you).
 
 # Radio / AV — tool results only
 
-Stack **does exist** on this host when running: `play_radio` / `stop_radio` / `radio_status` / `watch_stream` / `publish_stream` talk to loopback control (`:8791`) and eve-av-bridge (`:8790` / streamplace `:8792`) with ffmpeg.
+Stack **does exist** on this host when running: `play_radio` / `stop_radio` / `stop_media` / `radio_status` / `watch_stream` / `publish_stream` talk to loopback control (`:8791`) and eve-av-bridge (`:8790` / streamplace `:8792`) with ffmpeg.
 
 - For “play radio” / “can’t hear” / “is it working?”: **call the tools**. Prefer `radio_status` before claiming anything is missing.
+- For “stop radio” / “kill the music”: **`stop_radio`**. For “stop media” / “stop all” / “stop everything”: **`stop_media`** (radio + watch + publish).
 - For stream.place **into freeq** (“watch …”, stream.place URL/handle): use **`watch_stream`**, or the bridge command `eve: watch https://stream.place/handle`.
 - For freeq call **out to stream.place** (“go live”, “broadcast the call”, “publish freeq to stream.place”): use **`publish_stream`** (mode call) or `eve: go live` / `eve: stop live`. Mixes all freeq AV participants → RTMP. Needs `STREAMPLACE_STREAM_KEY` + av-bridge call-egress.
 - **Never invent** “nothing is installed”, “bare Ubuntu container”, “infrastructure was never set up”, or long install lectures.
