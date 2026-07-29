@@ -12,15 +12,32 @@ description: >-
 
 ## When
 
-- "play radio", "put on some music", "stream groove salad"
-- Named stations: groove, drone, beatblender, defcon, deepspace, indie, metal
+- "play radio" → **Groove Salad** (default)
+- "play radio def con", "play radio drone", "play groove salad", "radio fluid"
+- Named stations / aliases (pass the name in `station`; spaces ok):
+  - groove / groovesalad / salad → Groove Salad (default)
+  - defcon / def con → DEF CON Radio
+  - drone / dronezone → Drone Zone
+  - beatblender, deepspace, indie, metal, fluid, lush, secretagent, spacestation, …
+  - any SomaFM channel id, or a raw http(s) stream URL
 - "stop radio" / "kill the music" (radio only)
 - "stop media" / "stop all" / "stop everything" (radio + watch + publish)
 - "watch stream.place/…" / "go live on stream.place" / "publish radio to stream.place"
 
+## Channel fast-path (no agent)
+
+These hit the irc-bridge immediately (same as `eve: watch …`):
+
+- `eve: play radio` → Groove Salad
+- `eve: play radio def con` / `eve: play radio drone` / `eve: radio fluid`
+- `eve: play groove salad`
+
 ## Tools
 
 1. **`play_radio`** — ensure AV + stream a station (probes control + av-bridge first).
+   - **`station`**: pass only the station name (`"def con"`, `"drone"`, `"fluid"`).
+   - Omit `station` (or empty) for **Groove Salad**.
+   - Do **not** pass the whole user sentence when you can extract the name.
 2. **`stop_radio`** — stop radio decode/feed only (call may stay open). Prefer **`stop_media`** when they want everything off.
 3. **`stop_media`** — stop **all** media: radio, stream.place watch, and stream.place publish; releases MoQ planes.
 4. **`radio_status`** — live probes: control_up, av_bridge_up, radio_playing. Use when user can’t hear or before claiming anything is “missing”.

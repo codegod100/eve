@@ -1395,6 +1395,10 @@ class IrcClient {
         log(`stop-media command from ${from} in ${target}: ${body.slice(0, 80)}`);
         return;
       }
+      if (tryHandlePlayRadio(this, target, target, body)) {
+        log(`play-radio command from ${from} in ${target}: ${body.slice(0, 80)}`);
+        return;
+      }
       if (tryHandleWatch(this, target, target, body)) {
         log(`watch command from ${from} in ${target}: ${body.slice(0, 80)}`);
         return;
@@ -1426,6 +1430,10 @@ class IrcClient {
     const dmBody = text.trim();
     if (tryHandleStopMedia(this, from, IRC_CHANNEL, dmBody)) {
       log(`stop-media command DM from ${from}: ${dmBody.slice(0, 80)}`);
+      return;
+    }
+    if (tryHandlePlayRadio(this, from, IRC_CHANNEL, dmBody)) {
+      log(`play-radio command DM from ${from}: ${dmBody.slice(0, 80)}`);
       return;
     }
     if (tryHandleWatch(this, from, IRC_CHANNEL, dmBody)) {
@@ -3218,6 +3226,349 @@ function tryHandlePublish(ircClient, replyTarget, channel, body) {
         ircClient.sendPrivmsg(
           replyTarget,
           `publish failed: ${msg}`.slice(0, 350),
+        );
+      } catch {
+        /* ignore */
+      }
+    }
+  })();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// SomaFM station resolution (mirrors agent/tools/play_radio.ts)
+// ---------------------------------------------------------------------------
+
+/** @param {string} id */
+function somafmUrl(id) {
+  return `https://ice1.somafm.com/${id}-128-mp3`;
+}
+
+/** @type {Record<string, { id: string, label: string, url: string }>} */
+const SOMAFM_STATIONS = {
+  groovesalad: {
+    id: "groovesalad",
+    label: "SomaFM Groove Salad",
+    url: somafmUrl("groovesalad"),
+  },
+  dronezone: {
+    id: "dronezone",
+    label: "SomaFM Drone Zone",
+    url: somafmUrl("dronezone"),
+  },
+  beatblender: {
+    id: "beatblender",
+    label: "SomaFM Beat Blender",
+    url: somafmUrl("beatblender"),
+  },
+  defcon: {
+    id: "defcon",
+    label: "SomaFM DEF CON Radio",
+    url: somafmUrl("defcon"),
+  },
+  deepspaceone: {
+    id: "deepspaceone",
+    label: "SomaFM Deep Space One",
+    url: somafmUrl("deepspaceone"),
+  },
+  indiepop: {
+    id: "indiepop",
+    label: "SomaFM Indie Pop Rocks",
+    url: somafmUrl("indiepop"),
+  },
+  metal: {
+    id: "metal",
+    label: "SomaFM Metal Detector",
+    url: somafmUrl("metal"),
+  },
+  fluid: { id: "fluid", label: "SomaFM Fluid", url: somafmUrl("fluid") },
+  lush: { id: "lush", label: "SomaFM Lush", url: somafmUrl("lush") },
+  secretagent: {
+    id: "secretagent",
+    label: "SomaFM Secret Agent",
+    url: somafmUrl("secretagent"),
+  },
+  spacestation: {
+    id: "spacestation",
+    label: "SomaFM Space Station",
+    url: somafmUrl("spacestation"),
+  },
+  thetrip: {
+    id: "thetrip",
+    label: "SomaFM The Trip",
+    url: somafmUrl("thetrip"),
+  },
+  vaporwaves: {
+    id: "vaporwaves",
+    label: "SomaFM Vaporwaves",
+    url: somafmUrl("vaporwaves"),
+  },
+  darkzone: {
+    id: "darkzone",
+    label: "SomaFM The Dark Zone",
+    url: somafmUrl("darkzone"),
+  },
+  dubstep: {
+    id: "dubstep",
+    label: "SomaFM Dub Step Beyond",
+    url: somafmUrl("dubstep"),
+  },
+  cliqhop: {
+    id: "cliqhop",
+    label: "SomaFM cliqhop idm",
+    url: somafmUrl("cliqhop"),
+  },
+  synphaera: {
+    id: "synphaera",
+    label: "SomaFM Synphaera Radio",
+    url: somafmUrl("synphaera"),
+  },
+  digitalis: {
+    id: "digitalis",
+    label: "SomaFM Digitalis",
+    url: somafmUrl("digitalis"),
+  },
+  poptron: {
+    id: "poptron",
+    label: "SomaFM PopTron",
+    url: somafmUrl("poptron"),
+  },
+  seventies: {
+    id: "seventies",
+    label: "SomaFM Left Coast 70s",
+    url: somafmUrl("seventies"),
+  },
+  u80s: {
+    id: "u80s",
+    label: "SomaFM Underground 80s",
+    url: somafmUrl("u80s"),
+  },
+  bossa: {
+    id: "bossa",
+    label: "SomaFM Bossa Beyond",
+    url: somafmUrl("bossa"),
+  },
+  reggae: {
+    id: "reggae",
+    label: "SomaFM Heavyweight Reggae",
+    url: somafmUrl("reggae"),
+  },
+  thistle: {
+    id: "thistle",
+    label: "SomaFM ThistleRadio",
+    url: somafmUrl("thistle"),
+  },
+  missioncontrol: {
+    id: "missioncontrol",
+    label: "SomaFM Mission Control",
+    url: somafmUrl("missioncontrol"),
+  },
+  sf1033: {
+    id: "sf1033",
+    label: "SomaFM SF 10-33",
+    url: somafmUrl("sf1033"),
+  },
+  n5md: { id: "n5md", label: "SomaFM n5MD Radio", url: somafmUrl("n5md") },
+};
+
+const SOMAFM_DEFAULT = SOMAFM_STATIONS.groovesalad;
+
+/** @type {Record<string, string>} */
+const SOMAFM_ALIASES = {
+  groove: "groovesalad",
+  groovesalad: "groovesalad",
+  salad: "groovesalad",
+  drone: "dronezone",
+  dronezone: "dronezone",
+  beat: "beatblender",
+  beatblender: "beatblender",
+  blender: "beatblender",
+  defcon: "defcon",
+  def: "defcon",
+  deepspace: "deepspaceone",
+  deepspaceone: "deepspaceone",
+  deep: "deepspaceone",
+  indie: "indiepop",
+  indiepop: "indiepop",
+  metal: "metal",
+  metaldetector: "metal",
+  fluid: "fluid",
+  lush: "lush",
+  secretagent: "secretagent",
+  secret: "secretagent",
+  agent: "secretagent",
+  spacestation: "spacestation",
+  space: "spacestation",
+  thetrip: "thetrip",
+  trip: "thetrip",
+  vaporwaves: "vaporwaves",
+  vapor: "vaporwaves",
+  vaporwave: "vaporwaves",
+  darkzone: "darkzone",
+  dark: "darkzone",
+  dubstep: "dubstep",
+  dub: "dubstep",
+  cliqhop: "cliqhop",
+  cliq: "cliqhop",
+  synphaera: "synphaera",
+  digitalis: "digitalis",
+  poptron: "poptron",
+  seventies: "seventies",
+  leftcoast: "seventies",
+  leftcoast70s: "seventies",
+  u80s: "u80s",
+  underground80s: "u80s",
+  bossa: "bossa",
+  bossabeyond: "bossa",
+  reggae: "reggae",
+  thistle: "thistle",
+  thistleradio: "thistle",
+  missioncontrol: "missioncontrol",
+  mission: "missioncontrol",
+  sf1033: "sf1033",
+  n5md: "n5md",
+};
+
+const SOMAFM_NOISE =
+  /\b(play|put\s+on|stream|tune\s+(?:in\s+)?to|switch\s+to|somafm|soma\.?fm|soma|station|channel|please|some|music|the|a|an|on|for|me|us|now|fm)\b/gi;
+
+/** @param {string} s */
+function normalizeStationKey(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * Resolve free-text station name to { id, label, url }.
+ * Empty / unknown → Groove Salad. Accepts "def con", "play radio drone", URLs.
+ * @param {string | undefined | null} input
+ */
+function resolveSomaStation(input) {
+  if (!input || !String(input).trim()) return SOMAFM_DEFAULT;
+  const raw = String(input).trim();
+  if (/^https?:\/\//i.test(raw)) {
+    return { id: "url", label: raw, url: raw };
+  }
+  // "play radio" alone → empty stripped → default (do not fall back to raw).
+  const stripped = raw
+    .replace(SOMAFM_NOISE, " ")
+    .replace(/\bradio\b/gi, " ")
+    .trim();
+  if (!stripped) return SOMAFM_DEFAULT;
+  const key = normalizeStationKey(stripped);
+  if (!key) return SOMAFM_DEFAULT;
+
+  if (SOMAFM_ALIASES[key] && SOMAFM_STATIONS[SOMAFM_ALIASES[key]]) {
+    return SOMAFM_STATIONS[SOMAFM_ALIASES[key]];
+  }
+  if (SOMAFM_STATIONS[key]) return SOMAFM_STATIONS[key];
+
+  let best = null;
+  for (const [alias, id] of Object.entries(SOMAFM_ALIASES)) {
+    if (alias.length < 3) continue;
+    if (key.includes(alias) || alias.includes(key)) {
+      if (!best || alias.length > best.alias.length) best = { alias, id };
+    }
+  }
+  if (best && SOMAFM_STATIONS[best.id]) return SOMAFM_STATIONS[best.id];
+
+  const needle = (stripped || raw).toLowerCase();
+  for (const s of Object.values(SOMAFM_STATIONS)) {
+    const labelKey = normalizeStationKey(s.label);
+    if (
+      labelKey.includes(key) ||
+      key.includes(normalizeStationKey(s.label.replace(/^somafm\s+/i, ""))) ||
+      s.label.toLowerCase().includes(needle)
+    ) {
+      return s;
+    }
+  }
+
+  // Unknown but plausible SomaFM channel id.
+  if (/^[a-z][a-z0-9]{1,31}$/i.test(key)) {
+    return { id: key, label: `SomaFM ${key}`, url: somafmUrl(key) };
+  }
+  return SOMAFM_DEFAULT;
+}
+
+/**
+ * Fast-path: play radio [station] without an agent turn.
+ * Phrases: "play radio", "play radio def con", "radio drone", "play groove salad".
+ * @returns {boolean} true if handled
+ */
+function tryHandlePlayRadio(ircClient, replyTarget, channel, body) {
+  const raw = String(body ?? "").trim();
+  if (!raw) return false;
+
+  // Must look like a radio-play command (not "stop radio", not arbitrary chat).
+  // Accept:
+  //   play radio [station…]
+  //   radio [station…]          (but not "radio status" style — station optional)
+  //   play <known station phrase>
+  //   put on (some) (music|radio) [station]
+  let stationInput = null;
+
+  let m = raw.match(
+    /^(?:play\s+radio|put\s+on\s+(?:some\s+)?(?:music|radio)|stream\s+radio)(?:\s+(.+))?$/i,
+  );
+  if (m) {
+    stationInput = (m[1] || "").trim();
+  } else if (/^radio(?:\s+(.+))?$/i.test(raw)) {
+    const rest = raw.replace(/^radio\s*/i, "").trim();
+    // Don't steal "radio status" / unrelated one-word commands.
+    if (/^(status|stats|info|help)$/i.test(rest)) return false;
+    stationInput = rest;
+  } else {
+    // "play def con" / "play drone zone" / "play groovesalad"
+    m = raw.match(/^play\s+(.+)$/i);
+    if (!m) return false;
+    const rest = m[1].trim();
+    // Avoid stealing "play <url that isn't radio>" — only if it resolves to a
+    // known station OR is clearly somafm / a bare station-ish token.
+    if (/^https?:\/\//i.test(rest) && !/somafm/i.test(rest)) return false;
+    const probe = resolveSomaStation(rest);
+    const key = normalizeStationKey(
+      rest
+        .replace(SOMAFM_NOISE, " ")
+        .replace(/\bradio\b/gi, " ")
+        .trim() || rest,
+    );
+    const known =
+      Boolean(SOMAFM_ALIASES[key]) ||
+      Boolean(SOMAFM_STATIONS[key]) ||
+      /somafm/i.test(rest) ||
+      probe.id !== SOMAFM_DEFAULT.id ||
+      // exact default name request
+      /^(groove(?:\s*salad)?|salad)$/i.test(rest);
+    if (!known) return false;
+    stationInput = rest;
+  }
+
+  const resolved = resolveSomaStation(stationInput);
+  const ch = channel || IRC_CHANNEL;
+  void (async () => {
+    try {
+      log(
+        `play-radio command → ${resolved.id} (${resolved.label}) on ${ch}: ${resolved.url}`,
+      );
+      await playRadio({
+        url: resolved.url,
+        channel: ch,
+        title: `eve radio: ${resolved.label}`,
+      });
+      ircClient.sendPrivmsg(
+        replyTarget,
+        `playing ${resolved.label} on freeq AV in ${ch} — join the voice call to listen`.slice(
+          0,
+          350,
+        ),
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log(`play-radio failed: ${msg}`);
+      try {
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `play radio failed: ${msg}`.slice(0, 350),
         );
       } catch {
         /* ignore */

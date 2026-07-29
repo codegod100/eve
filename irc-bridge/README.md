@@ -118,6 +118,9 @@ Two paths (deduped):
 
 | Command | Effect |
 |---------|--------|
+| `eve: play radio` | freeq radio — default SomaFM Groove Salad |
+| `eve: play radio def con` / `eve: play radio drone` | freeq radio by SomaFM station name |
+| `eve: radio fluid` / `eve: play groove salad` | same (aliases / multi-word names ok) |
 | `eve: watch https://stream.place/<handle>` | switch stream.place rebroadcast to that streamer |
 | `eve: watch <handle>` / `eve: watch did:plc:…` | same |
 | `eve: go live` | publish active freeq radio source → stream.place RTMP |
