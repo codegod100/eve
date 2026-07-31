@@ -12,10 +12,10 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=STREAMPLACE_AV_BRIDGE_BIND=127.0.0.1:8792
 Environment=AV_BRIDGE_BIND=127.0.0.1:8792
 Environment=AV_PLANE_ROLE=watch
-# Tiny freeq tile: lowest H.264 we can get away with (P180 / 15fps / ~200kbps).
+# P180 freeq tile at continuous 15 fps (matches watch.rs demux/hold-last).
 Environment=AV_VIDEO_PRESET=180p
-Environment=AV_VIDEO_FPS=8
-Environment=AV_VIDEO_BITRATE=100000
+Environment=AV_VIDEO_FPS=15
+Environment=AV_VIDEO_BITRATE=150000
 Environment=RADIO_TITLE_HOOK=
 Environment=AV_INCLUDE_VIDEO=1
 EnvironmentFile=-%h/.config/eve/runtime.env

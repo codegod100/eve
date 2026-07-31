@@ -5,10 +5,11 @@ export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export AV_BRIDGE_BIND="${STREAM_WATCH_AV_BRIDGE_BIND:-${STREAMPLACE_AV_BRIDGE_BIND:-127.0.0.1:8792}}"
 export AV_PLANE_ROLE=watch
-# Tiny freeq tile — lowest encode that still looks ok in a small window.
+# P180 freeq tile at continuous 15 fps — matches demux/hold-last in watch.rs.
+# Keep 180p on 2-core boxd; bitrate modest so H.264 does not thrash Opus.
 export AV_VIDEO_PRESET="${AV_VIDEO_PRESET:-180p}"
-export AV_VIDEO_FPS="${AV_VIDEO_FPS:-8}"
-export AV_VIDEO_BITRATE="${AV_VIDEO_BITRATE:-100000}"
+export AV_VIDEO_FPS="${AV_VIDEO_FPS:-15}"
+export AV_VIDEO_BITRATE="${AV_VIDEO_BITRATE:-150000}"
 # Never announce ICY titles from the watch plane.
 export RADIO_TITLE_HOOK=
 echo "[av-bridge-stream-watch] bind=$AV_BRIDGE_BIND role=$AV_PLANE_ROLE preset=$AV_VIDEO_PRESET fps=$AV_VIDEO_FPS br=$AV_VIDEO_BITRATE"
