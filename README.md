@@ -5,8 +5,8 @@
 - **Model**: OpenCode Zen `deepseek-v4-flash-free` (OpenAI-compatible Chat Completions)
 - **Channels**: built-in eve channel + IRC via **irc-bridge** (POST `/irc/inbound` + SSE `/irc/out`)
 - **AV (optional)**: **av-bridge** (Rust) — freeq MoQ media planes + internet radio (`av-bridge/`, freeq `eve-av-bridge`); stream.place **watch** (`:8792`) and **publish** (RTMP egress)
-- **Tools**: cowsay, ATProto, rook/thermals, Anna, Linear (eve project), `guess_emotion`, **`play_radio` / `stop_radio` / `stop_media`** (stream to freeq AV; stop_media = all planes), **`watch_stream` / `publish_stream`** (stream.place in/out), **`memory_bank_add` / `memory_bank_list`** (durable song/note list)
-- **Skills**: `vit`, `vit-request-watch`, `anna`, `linear`, `freeq-irc`, `irc-backlog`, `embody-emotion`, **`freeq-radio`**
+- **Tools**: cowsay, ATProto, rook/thermals, Anna, Linear (eve project), `guess_emotion`, **`play_radio` / `stop_radio` / `stop_media`** (stream to freeq AV; stop_media = all planes), **`enter_voice_mode` / `exit_voice_mode` / `voice_status`** (Grok Voice duplex, default Eve timbre), **`enter_slide_mode` / `exit_slide_mode` / `slide_status`** (AV caption card: speech/text → tile only, no TTS), **`watch_stream` / `publish_stream`** (stream.place in/out), **`memory_bank_add` / `memory_bank_list`** (durable song/note list)
+- **Skills**: `vit`, `vit-request-watch`, `anna`, `linear`, `freeq-irc`, `irc-backlog`, `embody-emotion`, **`freeq-radio`**, **`freeq-voice`**, **`freeq-slide`**
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 
@@ -96,6 +96,38 @@ All Linear tools are **scoped to the Linear project named `eve`** (override with
 | `LINEAR_PROJECT_ID` | Optional UUID (skips name lookup) |
 
 Skill: `load_skill` → `linear`.
+
+## Slide mode (freeform AV caption card)
+
+You say something → Eve **shows it on the freeq AV slide** only. No TTS speak-back (avoids mic feedback loops). Repeats until exit.
+
+| Trigger | Action |
+|---------|--------|
+| `eve: enter slide mode` | Start listening |
+| type anything / speak in call | Slide shows it (display only) |
+| `eve: exit slide mode` | Stop |
+
+Tools: **`enter_slide_mode`**, **`exit_slide_mode`**, **`slide_status`**. Skill: `freeq-slide`. Join freeq **AV** to see the tile.
+
+## Voice / conversation mode (Grok Voice)
+
+Duplex speech in freeq AV via Cloudflare Workers AI `xai/grok-voice` (default spoken voice **`eve`**).
+
+| Trigger | Action |
+|---------|--------|
+| `eve: enter voice mode` / `enter conversation mode` | Start duplex + short spoken greeting |
+| `eve: exit voice mode` | Stop Grok session |
+| `eve: voice status` | Live/off probe |
+
+Tools: **`enter_voice_mode`**, **`exit_voice_mode`**, **`voice_status`**. Skill: `freeq-voice`.
+
+| Variable | Notes |
+|----------|--------|
+| `CLOUDFLARE_ACCOUNT_ID` | Workers AI account (config / runtime.env) |
+| `CLOUDFLARE_API_TOKEN` | From OpenBao `ai-api-keys` |
+| `GROK_VOICE` | Default `eve` |
+
+Users must **join the freeq voice call** in the channel. `stop_media` also ends voice mode.
 
 ## Memory bank (saved songs / notes)
 

@@ -16,6 +16,18 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
+import {
+  startVoiceSession,
+  stopVoiceSession,
+  voiceSessionStatus,
+} from "../voice-bridge/session.mjs";
+import {
+  startSlideSession,
+  stopSlideSession,
+  slideSessionStatus,
+  feedSlideAnswer,
+  skipSlide,
+} from "../slide-mode/session.mjs";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -1385,7 +1397,16 @@ class IrcClient {
         .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
         .join("|");
       const mention = new RegExp(`^(?:${alt})[,: ]+`, "i");
-      if (!mention.test(text)) return;
+      // Slide mode: bare channel lines count as answers while awaiting.
+      if (!mention.test(text)) {
+        if (tryHandleSlideAnswer(this, target, from, text)) {
+          log(
+            `slide answer (bare) from ${from} in ${target}: ${text.slice(0, 80)}`,
+          );
+          return;
+        }
+        return;
+      }
       const body = text.replace(mention, "").trim();
       if (!body) return;
       // Immediate 👀 so the user sees the bot accepted the mention.
@@ -1393,6 +1414,21 @@ class IrcClient {
       // Local slash-ish commands (no agent round-trip).
       if (tryHandleStopMedia(this, target, target, body)) {
         log(`stop-media command from ${from} in ${target}: ${body.slice(0, 80)}`);
+        return;
+      }
+      if (tryHandleSlideMode(this, target, target, body)) {
+        log(`slide-mode command from ${from} in ${target}: ${body.slice(0, 80)}`);
+        return;
+      }
+      if (tryHandleVoiceMode(this, target, target, body)) {
+        log(`voice-mode command from ${from} in ${target}: ${body.slice(0, 80)}`);
+        return;
+      }
+      // Mentioned answer during slide mode (not a control command).
+      if (tryHandleSlideAnswer(this, target, from, body)) {
+        log(
+          `slide answer (mention) from ${from} in ${target}: ${body.slice(0, 80)}`,
+        );
         return;
       }
       if (tryHandlePlayRadio(this, target, target, body)) {
@@ -1430,6 +1466,18 @@ class IrcClient {
     const dmBody = text.trim();
     if (tryHandleStopMedia(this, from, IRC_CHANNEL, dmBody)) {
       log(`stop-media command DM from ${from}: ${dmBody.slice(0, 80)}`);
+      return;
+    }
+    if (tryHandleSlideMode(this, from, IRC_CHANNEL, dmBody)) {
+      log(`slide-mode command DM from ${from}: ${dmBody.slice(0, 80)}`);
+      return;
+    }
+    if (tryHandleVoiceMode(this, from, IRC_CHANNEL, dmBody)) {
+      log(`voice-mode command DM from ${from}: ${dmBody.slice(0, 80)}`);
+      return;
+    }
+    if (tryHandleSlideAnswer(this, IRC_CHANNEL, from, dmBody)) {
+      log(`slide answer DM from ${from}: ${dmBody.slice(0, 80)}`);
       return;
     }
     if (tryHandlePlayRadio(this, from, IRC_CHANNEL, dmBody)) {
@@ -2355,15 +2403,27 @@ async function playStreamplace({ channel, streamer } = {}) {
   }
 
   // stream-watch plane only — never radio/play.
-  const res = await fetch(`${STREAM_WATCH_AV_BRIDGE_URL}/v1/watch/play`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url: picked.hls }),
-    signal: AbortSignal.timeout(60_000),
-  });
+  let res;
+  try {
+    res = await fetch(`${STREAM_WATCH_AV_BRIDGE_URL}/v1/watch/play`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: picked.hls }),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (e) {
+    const cause = e instanceof Error ? e.message : String(e);
+    // Node undici: dead bridge → "fetch failed" / ECONNREFUSED with no body.
+    throw new Error(
+      `watch plane unreachable (${STREAM_WATCH_AV_BRIDGE_URL}): ${cause}. ` +
+        `Is eve-av-bridge-streamplace running?`,
+    );
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json.ok === false) {
-    throw new Error(json.error || `streamplace radio play ${res.status}`);
+    throw new Error(
+      json.error || `stream-watch /v1/watch/play ${res.status}`,
+    );
   }
 
   // Keep following freeq rooms for the whole watch lifetime (not just ~30s).
@@ -3640,6 +3700,17 @@ async function stopAllMedia() {
   const pub = stopStreamplacePublish();
   clearStreamplacePref();
   lastRadioTitle = null;
+  // Drop slide game + Grok Voice duplex before tearing MoQ planes.
+  try {
+    await stopSlideSession("stop-media");
+  } catch (e) {
+    log(`slide stop during stopAllMedia: ${e instanceof Error ? e.message : e}`);
+  }
+  try {
+    await stopVoiceSession();
+  } catch (e) {
+    log(`voice stop during stopAllMedia: ${e instanceof Error ? e.message : e}`);
+  }
   await releaseAllPlanes();
   log("all media stopped");
   return {
@@ -3648,6 +3719,396 @@ async function stopAllMedia() {
     wasPublishing: Boolean(pub?.wasPublishing),
     message: "all media stopped",
   };
+}
+
+/**
+ * Slide mode (freeform AV caption): you say something → slide shows it.
+ * STT only — no TTS speak-back (that would loop into the mic).
+ */
+async function startSlideMode({ channel, withVoice } = {}) {
+  const ch = channel
+    ? channel.startsWith("#")
+      ? channel
+      : `#${channel}`
+    : IRC_CHANNEL;
+  radioAnnounceChannel = ch;
+
+  // Prefer a quiet radio plane for caption cards.
+  stopMediaFollow("startSlideMode exclusive");
+  try {
+    await fetch(`${RADIO_AV_BRIDGE_URL}/v1/radio/stop`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    /* ignore */
+  }
+
+  let av = null;
+  const wantVoice = withVoice !== false;
+  if (wantVoice) {
+    try {
+      // Fresh MoQ attach so STT duplex can bind to the radio plane.
+      av = await ensureAv(ch, "eve slide captions", RADIO_AV_BRIDGE_URL, {
+        force: true,
+      });
+      // Confirm bridge still has session before opening voice WS.
+      const stAv = await fetch(`${RADIO_AV_BRIDGE_URL}/v1/status`, {
+        signal: AbortSignal.timeout(5_000),
+      }).then((r) => r.json());
+      if (!stAv?.session?.session_id) {
+        throw new Error("av-bridge has no session after ensureAv");
+      }
+      log(
+        `slide av ready ${stAv.session.session_id}/${stAv.session.nick}~${stAv.session.instance}`,
+      );
+    } catch (e) {
+      log(
+        `slide ensureAv (optional): ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
+  const st = await startSlideSession({
+    channel: ch,
+    withVoice: wantVoice && Boolean(av),
+    avBridgeUrl: RADIO_AV_BRIDGE_URL,
+    onLog: (m) => log(`slide: ${m}`),
+    say: (target, text) => {
+      try {
+        irc.sendPrivmsg(target, text);
+      } catch (e) {
+        log(`slide say failed: ${e instanceof Error ? e.message : e}`);
+      }
+    },
+  });
+
+  return {
+    ok: true,
+    live: Boolean(st.live),
+    state: st.state,
+    channel: ch,
+    index: st.index,
+    total: st.total,
+    question: st.question,
+    av: av
+      ? { sessionId: av.sessionId, instance: av.instance, nick: av.nick }
+      : null,
+    say: `Slide captions on (AV only) in ${ch} — speak in the call; tile only, no voice echo. exit slide mode to quit.`,
+  };
+}
+
+async function stopSlideMode({ reason } = {}) {
+  const prev = slideSessionStatus();
+  const st = await stopSlideSession(reason || "api");
+  log(`slide mode stop (${reason || "api"}) was=${prev.state}`);
+  return {
+    ok: true,
+    live: false,
+    state: st.state || "idle",
+    wasLive: Boolean(prev.live),
+    say: "Slide captions off.",
+  };
+}
+
+/**
+ * @returns {boolean} true if handled as an answer
+ */
+function tryHandleSlideAnswer(_ircClient, channel, from, text) {
+  const st = slideSessionStatus();
+  if (!st.live || !st.awaiting) return false;
+  // Only accept answers for the active slide channel.
+  const ch = channel.startsWith("#") ? channel : `#${channel}`;
+  if (st.channel && st.channel.toLowerCase() !== ch.toLowerCase()) {
+    // DMs feed into the game channel
+    if (!channel.startsWith("#") && !channel.startsWith("&")) {
+      // allow DM answers for the active game
+    } else {
+      return false;
+    }
+  }
+  return feedSlideAnswer(from, text);
+}
+
+/**
+ * Fast-path: enter/exit/skip/status slide mode.
+ * @returns {boolean}
+ */
+function tryHandleSlideMode(ircClient, replyTarget, channel, body) {
+  const raw = String(body ?? "").trim();
+  if (!raw) return false;
+
+  if (
+    /^(?:slide\s+status|is\s+slide\s+(?:mode\s+)?on)\b/i.test(raw)
+  ) {
+    void (async () => {
+      try {
+        const st = slideSessionStatus();
+        const msg = st.live
+          ? `slide captions live on ${st.channel || channel} — ${st.echoCount ?? 0} shown${st.awaiting ? " (listening)" : ""}`
+          : `slide captions off (state=${st.state || "idle"})`;
+        ircClient.sendPrivmsg(replyTarget, msg.slice(0, 350));
+      } catch (e) {
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `slide status failed: ${e instanceof Error ? e.message : e}`.slice(
+            0,
+            350,
+          ),
+        );
+      }
+    })();
+    return true;
+  }
+
+  if (
+    /^(?:skip(?:\s+slide)?|next\s+slide)\b/i.test(raw)
+  ) {
+    void (async () => {
+      try {
+        const st = await skipSlide();
+        if (!st.live && st.state === "idle") {
+          ircClient.sendPrivmsg(replyTarget, "no slide to skip");
+        }
+      } catch (e) {
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `skip failed: ${e instanceof Error ? e.message : e}`.slice(0, 350),
+        );
+      }
+    })();
+    return true;
+  }
+
+  if (
+    /^(?:exit|leave|end|stop|quit)\s+slide(?:\s+mode)?\b/i.test(raw) ||
+    /^(?:slide\s+mode\s+off|disable\s+slide)\b/i.test(raw)
+  ) {
+    void (async () => {
+      try {
+        const out = await stopSlideMode({ reason: "fast-path" });
+        ircClient.sendPrivmsg(
+          replyTarget,
+          (out.say || "slide mode off").slice(0, 350),
+        );
+      } catch (e) {
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `exit slide mode failed: ${e instanceof Error ? e.message : e}`.slice(
+            0,
+            350,
+          ),
+        );
+      }
+    })();
+    return true;
+  }
+
+  if (
+    /^(?:enter|start|enable|begin)\s+slide(?:\s+mode)?\b/i.test(raw) ||
+    /^(?:slide\s+mode)(?:\s+on)?$/i.test(raw)
+  ) {
+    const ch = channel || IRC_CHANNEL;
+    void (async () => {
+      try {
+        log(`slide-mode start on ${ch}`);
+        const out = await startSlideMode({ channel: ch });
+        // Intro PRIVMSG is sent by the session; ack briefly.
+        if (!out.ok) {
+          ircClient.sendPrivmsg(
+            replyTarget,
+            (out.say || "slide mode failed").slice(0, 350),
+          );
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(`slide-mode start failed: ${msg}`);
+        try {
+          ircClient.sendPrivmsg(
+            replyTarget,
+            `enter slide mode failed: ${msg}`.slice(0, 350),
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+    })();
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Start Grok Voice duplex (default voice=eve) into freeq AV on a channel.
+ * Ensures MoQ on the radio plane, stops radio decode (shares speak queue).
+ */
+async function startVoiceMode({ channel, voice, title } = {}) {
+  const ch = channel
+    ? channel.startsWith("#")
+      ? channel
+      : `#${channel}`
+    : IRC_CHANNEL;
+  const v = (voice || process.env.GROK_VOICE || "eve").toLowerCase();
+  radioAnnounceChannel = ch;
+
+  // Exclusive radio-plane media (voice uses speak_pcm on this bridge).
+  stopMediaFollow("startVoiceMode exclusive");
+  try {
+    await fetch(`${RADIO_AV_BRIDGE_URL}/v1/radio/stop`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    /* ignore */
+  }
+
+  const av = await ensureAv(
+    ch,
+    title || `eve voice (${v})`,
+    RADIO_AV_BRIDGE_URL,
+  );
+
+  const st = await startVoiceSession({
+    avBridgeUrl: RADIO_AV_BRIDGE_URL,
+    voice: v,
+    channel: ch,
+    onLog: (m) => log(`voice: ${m}`),
+  });
+
+  return {
+    ok: true,
+    live: Boolean(st.live),
+    state: st.state,
+    voice: st.voice || v,
+    channel: ch,
+    av: {
+      sessionId: av.sessionId,
+      instance: av.instance,
+      nick: av.nick,
+      channel: ch,
+    },
+    say: `Voice mode on (${st.voice || v}) in ${ch} — join the freeq voice call to talk. exit voice mode to leave.`,
+  };
+}
+
+async function stopVoiceMode({ reason } = {}) {
+  const prev = voiceSessionStatus();
+  const st = await stopVoiceSession();
+  log(`voice mode stop (${reason || "api"}) was=${prev.state}`);
+  return {
+    ok: true,
+    live: false,
+    state: st.state || "idle",
+    wasLive: Boolean(prev.live),
+    say: "Voice mode off.",
+  };
+}
+
+/**
+ * Fast-path: enter/exit voice (conversation) mode without an agent turn.
+ * @returns {boolean} true if handled
+ */
+function tryHandleVoiceMode(ircClient, replyTarget, channel, body) {
+  const raw = String(body ?? "").trim();
+  if (!raw) return false;
+
+  // Status
+  if (
+    /^(?:voice\s+status|conversation\s+status|is\s+voice\s+(?:mode\s+)?on)\b/i.test(
+      raw,
+    )
+  ) {
+    void (async () => {
+      try {
+        const st = voiceSessionStatus();
+        const msg = st.live
+          ? `voice mode live (${st.voice || "eve"}) on ${st.channel || channel || IRC_CHANNEL} — join freeq AV to talk`
+          : `voice mode off (state=${st.state || "idle"})`;
+        ircClient.sendPrivmsg(replyTarget, msg.slice(0, 350));
+      } catch (e) {
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `voice status failed: ${e instanceof Error ? e.message : e}`.slice(
+            0,
+            350,
+          ),
+        );
+      }
+    })();
+    return true;
+  }
+
+  // Exit / stop
+  if (
+    /^(?:exit|leave|end|stop|quit)\s+(?:voice(?:\s+mode)?|conversation(?:\s+mode)?)\b/i.test(
+      raw,
+    ) ||
+    /^(?:voice\s+mode\s+off|conversation\s+mode\s+off|disable\s+voice)\b/i.test(
+      raw,
+    )
+  ) {
+    void (async () => {
+      try {
+        const out = await stopVoiceMode({ reason: "fast-path" });
+        ircClient.sendPrivmsg(
+          replyTarget,
+          (out.say || "voice mode off").slice(0, 350),
+        );
+      } catch (e) {
+        ircClient.sendPrivmsg(
+          replyTarget,
+          `exit voice mode failed: ${e instanceof Error ? e.message : e}`.slice(
+            0,
+            350,
+          ),
+        );
+      }
+    })();
+    return true;
+  }
+
+  // Enter / start
+  if (
+    /^(?:enter|start|enable|begin)\s+(?:voice(?:\s+mode)?|conversation(?:\s+mode)?)\b/i.test(
+      raw,
+    ) ||
+    /^(?:voice\s+mode|conversation\s+mode)(?:\s+on)?$/i.test(raw) ||
+    /^talk\s+(?:with\s+)?(?:voice|me)\b/i.test(raw)
+  ) {
+    // Optional: "enter voice mode orion" / "enter conversation mode voice=ara"
+    let voice = process.env.GROK_VOICE || "eve";
+    const vm = raw.match(
+      /\b(?:voice[=:]?\s*|as\s+)(eve|ara|leo|rex|sal|orion|carina|zagan|helix|luna|iris|altair|zenith|perseus|helios|lux|kepler|rigel|cosmo|celeste|ursa|sirius|lumen|castor|naksh|atlas)\b/i,
+    );
+    if (vm) voice = vm[1].toLowerCase();
+
+    const ch = channel || IRC_CHANNEL;
+    void (async () => {
+      try {
+        log(`voice-mode start → ${voice} on ${ch}`);
+        const out = await startVoiceMode({ channel: ch, voice });
+        ircClient.sendPrivmsg(
+          replyTarget,
+          (out.say || `voice mode on (${voice})`).slice(0, 350),
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(`voice-mode start failed: ${msg}`);
+        try {
+          ircClient.sendPrivmsg(
+            replyTarget,
+            `enter voice mode failed: ${msg}`.slice(0, 350),
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+    })();
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -3819,6 +4280,12 @@ const controlServer = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/radio/play") {
       const body = await readJson(req);
+      // Radio and duplex voice share the speak path — drop voice first.
+      try {
+        await stopVoiceSession();
+      } catch {
+        /* ignore */
+      }
       const out = await playRadio(body);
       sendJson(res, 200, { ok: true, ...out });
       return;
@@ -3826,6 +4293,57 @@ const controlServer = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/radio/stop") {
       const out = await stopRadio();
       sendJson(res, 200, out);
+      return;
+    }
+    // Grok Voice duplex (default Eve timbre) over freeq AV
+    if (req.method === "POST" && url.pathname === "/voice/start") {
+      const body = await readJson(req);
+      const out = await startVoiceMode(body);
+      sendJson(res, 200, out);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/voice/stop") {
+      let body = {};
+      try {
+        body = await readJson(req);
+      } catch {
+        body = {};
+      }
+      const out = await stopVoiceMode(body);
+      sendJson(res, 200, out);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/voice/status") {
+      const st = voiceSessionStatus();
+      sendJson(res, 200, { ok: true, ...st });
+      return;
+    }
+    // Slide mode quiz game
+    if (req.method === "POST" && url.pathname === "/slide/start") {
+      const body = await readJson(req);
+      const out = await startSlideMode(body);
+      sendJson(res, 200, out);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/slide/stop") {
+      let body = {};
+      try {
+        body = await readJson(req);
+      } catch {
+        body = {};
+      }
+      const out = await stopSlideMode(body);
+      sendJson(res, 200, out);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/slide/skip") {
+      const out = await skipSlide();
+      sendJson(res, 200, { ok: true, ...out });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/slide/status") {
+      const st = slideSessionStatus();
+      sendJson(res, 200, { ok: true, ...st });
       return;
     }
     // Stop radio + stream.place watch + publish + release all MoQ planes.

@@ -15,7 +15,8 @@ Environment=AV_PLANE_ROLE=watch
 # P180 freeq tile at continuous 15 fps (matches watch.rs demux/hold-last).
 Environment=AV_VIDEO_PRESET=180p
 Environment=AV_VIDEO_FPS=15
-Environment=AV_VIDEO_BITRATE=150000
+# 150k was too thin for motion (looked like freezes). 400k @ 180p15 is still light.
+Environment=AV_VIDEO_BITRATE=400000
 Environment=RADIO_TITLE_HOOK=
 Environment=AV_INCLUDE_VIDEO=1
 EnvironmentFile=-%h/.config/eve/runtime.env

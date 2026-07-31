@@ -5,14 +5,14 @@ const CONTROL = process.env.IRC_CONTROL_URL ?? "http://127.0.0.1:8791";
 
 export default defineTool({
   description:
-    "Stop all freeq AV media: internet radio, stream.place watch, stream.place publish, and voice mode. " +
-    "Broader than stop_radio (radio only), exit_voice_mode (voice only), or publish_stream stop (publish only). " +
-    "Use when the user says stop media, stop all, stop everything, kill media, or silence all media.",
+    "Exit voice / conversation mode and stop the Grok Voice duplex session. " +
+    "Use for 'exit voice mode', 'leave voice mode', 'stop voice', 'end conversation mode'. " +
+    "Does not tear down freeq AV unless stop_media is also used.",
   inputSchema: z.object({
     reason: z.string().optional().describe("Optional note for logs."),
   }),
   async execute({ reason }) {
-    const res = await fetch(`${CONTROL}/media/stop`, {
+    const res = await fetch(`${CONTROL}/voice/stop`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ reason }),
@@ -21,23 +21,22 @@ export default defineTool({
     const json = (await res.json().catch(() => ({}))) as {
       ok?: boolean;
       error?: string;
-      stopped?: boolean;
-      wasPublishing?: boolean;
-      message?: string;
+      state?: string;
+      live?: boolean;
+      say?: string;
     };
     if (!res.ok || json.ok === false) {
       return {
         ok: false,
         error: json.error || `control ${res.status}`,
-        say: "Couldn't stop all media.",
+        say: "Couldn't exit voice mode.",
       };
     }
     return {
       ok: true,
-      stopped: true,
-      wasPublishing: json.wasPublishing ?? null,
-      message: json.message ?? "all media stopped",
-      say: "Stopped all media (radio, stream.place watch, publish, and voice mode).",
+      live: false,
+      state: json.state ?? "idle",
+      say: json.say || "Voice mode off.",
     };
   },
 });
