@@ -2196,6 +2196,7 @@ async function pickTopStreamplaceStream() {
   const count = viewers(top);
   if (!did) throw new Error("top stream missing author.did");
   const hls = `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(did)}`;
+  const whep = `${STREAMPLACE_API}/xrpc/place.stream.playback.whep?streamer=${encodeURIComponent(did)}&rendition=${encodeURIComponent(process.env.STREAMPLACE_WHEP_RENDITION || "source")}`;
   return {
     did,
     handle,
@@ -2203,6 +2204,7 @@ async function pickTopStreamplaceStream() {
     viewers: count,
     url: top?.record?.url ?? `https://stream.place/${did}`,
     hls,
+    whep,
     ranked: streams.slice(0, 5).map((s) => ({
       handle: s?.author?.handle,
       did: s?.author?.did,
@@ -2329,6 +2331,7 @@ async function playStreamplace({ channel, streamer } = {}) {
       viewers: null,
       url: `https://stream.place/${id}`,
       hls: `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(id)}`,
+      whep: `${STREAMPLACE_API}/xrpc/place.stream.playback.whep?streamer=${encodeURIComponent(id)}&rendition=${encodeURIComponent(process.env.STREAMPLACE_WHEP_RENDITION || "source")}`,
       ranked: [],
     };
     // Resolve handle for nicer logs if we only got a handle.
@@ -2370,6 +2373,7 @@ async function playStreamplace({ channel, streamer } = {}) {
             hit?.record?.url ?? `https://stream.place/${picked.did || id}`;
           const streamerId = picked.did || id;
           picked.hls = `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(streamerId)}`;
+          picked.whep = `${STREAMPLACE_API}/xrpc/place.stream.playback.whep?streamer=${encodeURIComponent(streamerId)}&rendition=${encodeURIComponent(process.env.STREAMPLACE_WHEP_RENDITION || "source")}`;
         }
       }
     } catch (e) {
@@ -2403,27 +2407,44 @@ async function playStreamplace({ channel, streamer } = {}) {
   }
 
   // stream-watch plane only — never radio/play.
+  // Prefer WHEP (low-latency WebRTC); fall back to HLS if play fails.
+  const preferWhep = process.env.STREAMPLACE_WATCH_TRANSPORT !== "hls";
+  const playUrls = preferWhep
+    ? [picked.whep || picked.hls, picked.hls].filter(Boolean)
+    : [picked.hls, picked.whep].filter(Boolean);
   let res;
-  try {
-    res = await fetch(`${STREAM_WATCH_AV_BRIDGE_URL}/v1/watch/play`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: picked.hls }),
-      signal: AbortSignal.timeout(60_000),
-    });
-  } catch (e) {
-    const cause = e instanceof Error ? e.message : String(e);
-    // Node undici: dead bridge → "fetch failed" / ECONNREFUSED with no body.
-    throw new Error(
-      `watch plane unreachable (${STREAM_WATCH_AV_BRIDGE_URL}): ${cause}. ` +
-        `Is eve-av-bridge-streamplace running?`,
-    );
+  let json = {};
+  let usedUrl = playUrls[0];
+  let lastErr = null;
+  for (const playUrl of playUrls) {
+    usedUrl = playUrl;
+    try {
+      res = await fetch(`${STREAM_WATCH_AV_BRIDGE_URL}/v1/watch/play`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: playUrl }),
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (e) {
+      const cause = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `watch plane unreachable (${STREAM_WATCH_AV_BRIDGE_URL}): ${cause}. ` +
+          `Is eve-av-bridge-streamplace running?`,
+      );
+    }
+    json = await res.json().catch(() => ({}));
+    if (res.ok && json.ok !== false) {
+      log(
+        `streamplace watch transport=${String(playUrl).includes("playback.whep") ? "whep" : "hls"}`,
+      );
+      lastErr = null;
+      break;
+    }
+    lastErr = json.error || `stream-watch /v1/watch/play ${res.status}`;
+    log(`streamplace watch play failed (${lastErr}); trying next transport`);
   }
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.ok === false) {
-    throw new Error(
-      json.error || `stream-watch /v1/watch/play ${res.status}`,
-    );
+  if (lastErr) {
+    throw new Error(lastErr);
   }
 
   // Keep following freeq rooms for the whole watch lifetime (not just ~30s).
@@ -2433,7 +2454,7 @@ async function playStreamplace({ channel, streamer } = {}) {
     channel: ch,
     bridgeUrl: STREAMPLACE_AV_BRIDGE_URL,
     title: title.slice(0, 120),
-    radioUrl: picked.hls,
+    radioUrl: usedUrl,
   });
 
   // Optional channel notice (once per start).
