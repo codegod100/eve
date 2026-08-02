@@ -16,9 +16,8 @@ import {
 } from "../lib/vit-request-caps.js";
 
 const REPORT_EMPTY = () =>
-  process.env.VIT_REQUEST_REPORT_EMPTY !== "0" &&
-  process.env.VIT_REQUEST_REPORT_EMPTY !== "false";
-// boxd default: report even when empty so manual triggers are visible
+  process.env.VIT_REQUEST_REPORT_EMPTY === "1" ||
+  process.env.VIT_REQUEST_REPORT_EMPTY === "true";
 
 export default defineSchedule({
   cron: "*/10 * * * *",
