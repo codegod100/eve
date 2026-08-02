@@ -1,10 +1,13 @@
 name: Deploy to eve.boxd.sh
 
 # Merge (push to main) → sync /home/boxd/my-agent on the eve VM and restart
-# systemd units. Requires repo secret BOXD_API_KEY (boxd auth key, bxd_…).
+# systemd units.
 #
-#   boxd auth keys create "gh-actions deploy codegod100/eve"
-#   gh secret set BOXD_API_KEY --repo codegod100/eve --body "$KEY"
+# Secrets:
+#   OPENBAO_TOKEN — reads BOXD_API_KEY from openbao.boxd.sh (secret/data/ai-api-keys)
+# Mint / refresh the boxd key and store it in OpenBao:
+#   KEY=$(boxd auth keys create "gh-actions deploy codegod100/eve")
+#   # write KEY into OpenBao path secret/data/ai-api-keys as BOXD_API_KEY
 
 on:
   push:
@@ -26,24 +29,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Require BOXD_API_KEY
+      - name: Fetch BOXD_API_KEY from OpenBao
+        id: openbao
         env:
-          BOXD_API_KEY: ${{ secrets.BOXD_API_KEY }}
+          OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR || 'https://openbao.boxd.sh' }}
+          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
         run: |
-          if [ -z "${BOXD_API_KEY}" ]; then
-            echo "::error::Missing repo secret BOXD_API_KEY."
-            echo "Mint one and store it:"
-            echo "  KEY=\$(boxd auth keys create 'gh-actions deploy codegod100/eve')"
-            echo "  gh secret set BOXD_API_KEY --repo codegod100/eve --body \"\$KEY\""
+          set -euo pipefail
+          if [ -z "${OPENBAO_TOKEN}" ]; then
+            echo "::error::Missing repo secret OPENBAO_TOKEN (needed to read BOXD_API_KEY from OpenBao)."
             exit 1
           fi
+          URL="${OPENBAO_ADDR%/}/v1/secret/data/ai-api-keys"
+          RESP=$(curl -fsS -H "X-Vault-Token: ${OPENBAO_TOKEN}" "$URL") || {
+            echo "::error::Failed to read ${URL}"
+            exit 1
+          }
+          KEY=$(jq -r '.data.data.BOXD_API_KEY // empty' <<<"$RESP")
+          if [ -z "$KEY" ]; then
+            echo "::error::OpenBao ai-api-keys has no BOXD_API_KEY."
+            echo "Mint one and store it in secret/data/ai-api-keys:"
+            echo "  KEY=\$(boxd auth keys create 'gh-actions deploy codegod100/eve')"
+            exit 1
+          fi
+          # Mask + export for later steps (BOXD_TOKEN is what the CLI reads).
+          echo "::add-mask::${KEY}"
+          echo "BOXD_TOKEN=${KEY}" >>"$GITHUB_ENV"
+          echo "Fetched BOXD_API_KEY from OpenBao (len=${#KEY})."
 
       - name: Install boxd CLI
         run: curl -fsSL https://boxd.sh/downloads/cli/install.sh | sh
 
       - name: Wake eve (if hibernated / paused / stopped)
-        env:
-          BOXD_TOKEN: ${{ secrets.BOXD_API_KEY }}
         run: |
           export PATH="${HOME}/.local/bin:${PATH}"
           # Best-effort: only one of these applies depending on machine state.
@@ -54,7 +71,6 @@ jobs:
 
       - name: Deploy to eve.boxd.sh
         env:
-          BOXD_TOKEN: ${{ secrets.BOXD_API_KEY }}
           DEPLOY_SHA: ${{ inputs.sha || github.sha }}
         run: |
           export PATH="${HOME}/.local/bin:${PATH}"

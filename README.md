@@ -184,14 +184,20 @@ npm run boxd:start                # systemctl --user start eve.target
 ### CI deploy (merge → eve.boxd.sh)
 
 Pushing (or merging) to `main` runs [`.github/workflows/deploy-boxd.yml`](.github/workflows/deploy-boxd.yml):
-it wakes the `eve` VM, `git reset --hard`s `/home/boxd/my-agent` to the merge SHA,
-then runs `scripts/deploy-boxd.sh` (`npm ci` + `scripts/start.sh`).
+it reads `BOXD_API_KEY` from OpenBao (`secret/data/ai-api-keys`), wakes the `eve` VM,
+`git reset --hard`s `/home/boxd/my-agent` to the merge SHA, then runs
+`scripts/deploy-boxd.sh` (`npm ci` + `scripts/start.sh`).
 
-One-time secret (raw key shown only once):
+| Where | What |
+|-------|------|
+| GitHub secret `OPENBAO_TOKEN` | Lets Actions read OpenBao |
+| OpenBao `ai-api-keys` → `BOXD_API_KEY` | `bxd_…` key for `boxd machine exec eve` |
+
+Refresh the boxd key (raw value shown only once) and write it into OpenBao:
 
 ```bash
 KEY=$(boxd auth keys create "gh-actions deploy codegod100/eve")
-gh secret set BOXD_API_KEY --repo codegod100/eve --body "$KEY"
+# upsert BOXD_API_KEY=$KEY on secret/data/ai-api-keys at openbao.boxd.sh
 ```
 
 Manual redeploy: Actions → **Deploy to eve.boxd.sh** → Run workflow.
