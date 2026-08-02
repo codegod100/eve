@@ -1,6 +1,6 @@
-# Python deps for scripts/whep-watch-demux.py (stream.place WHEP → freeq).
-# Installed by scripts/prep.sh / scripts/install-whep-deps.sh into the user env.
-aiortc>=1.9.0
-aiohttp>=3.9.0
-av>=12.0.0
-numpy>=1.26.0
+# Deprecated for runtime: WHEP demux Python deps come from the flake.
+#   nix build .#whep-python
+#   bash scripts/install-whep-deps.sh
+#
+# Kept as a human-readable list of the packages in flake.nix whepPython:
+#   aiortc, aiohttp, av, numpy

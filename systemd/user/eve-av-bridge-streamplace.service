@@ -8,13 +8,15 @@ PartOf=eve.target
 Type=simple
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/share/eve/whep-python/bin:%h/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 Environment=STREAMPLACE_AV_BRIDGE_BIND=127.0.0.1:8792
 Environment=AV_BRIDGE_BIND=127.0.0.1:8792
 Environment=AV_PLANE_ROLE=watch
 # stream.place watch is WHEP-only — never set STREAMPLACE_WATCH_TRANSPORT=hls.
 Environment=STREAMPLACE_WATCH_TRANSPORT=whep
-Environment=WHEP_DEMUX_PATH=@ROOT@/scripts/whep-watch-demux.py
+# Flake-built python + wrapper from scripts/install-whep-deps.sh (prep).
+Environment=WHEP_PYTHON=%h/.local/share/eve/whep-python/bin/python3
+Environment=WHEP_DEMUX_PATH=%h/.local/share/eve/whep-watch-demux
 # P360 freeq tile at continuous 20 fps (matches watch.rs demux drop-frame).
 Environment=AV_VIDEO_PRESET=360p
 Environment=AV_VIDEO_FPS=20

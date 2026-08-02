@@ -9,7 +9,7 @@
 #   boxd machine exec eve -- …
 set -euo pipefail
 
-export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="${HOME}/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 # Non-interactive boxd exec shells often lack a user systemd session.
 if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
@@ -48,6 +48,13 @@ if [ "$SKIP_INSTALL" -eq 0 ]; then
   npm ci
 else
   echo "[deploy] skipping npm ci (--skip-install)"
+fi
+
+# Refresh unit templates (WHEP flake paths, prep timeout, PATH) without
+# changing which units are enabled.
+if systemctl --user cat eve.target >/dev/null 2>&1; then
+  echo "[deploy] refreshing systemd user units ..."
+  bash "$ROOT/scripts/install-systemd.sh" --no-enable
 fi
 
 echo "[deploy] restarting stack ..."

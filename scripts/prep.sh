@@ -5,7 +5,7 @@
 # Used by eve-prep.service and by start.sh (legacy / non-systemd path).
 set -euo pipefail
 
-export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="${HOME}/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -114,8 +114,10 @@ set_default AV_BRIDGE_BIND "127.0.0.1:8790"
 set_default RADIO_TITLE_HOOK "http://127.0.0.1:8791/radio/now-playing"
 set_default MEMORY_BANK_PATH "${HOME}/memory-bank.txt"
 
-# PATH for services (annas-mcp, ffmpeg, etc.)
-env_set PATH "${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# PATH for services (flake whep-python first so shebang python3 is correct,
+# then annas-mcp / ffmpeg / nix).
+WHEP_PYTHON_BIN="${HOME}/.local/share/eve/whep-python/bin"
+env_set PATH "${WHEP_PYTHON_BIN}:${HOME}/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin"
 env_set HOME "${HOME}"
 env_set EVE_ROOT "${ROOT}"
 
@@ -154,13 +156,32 @@ else
 fi
 
 # --- stream.place WHEP demux (watch is WHEP-only; never HLS) -----------------
-set_default WHEP_DEMUX_PATH "${ROOT}/scripts/whep-watch-demux.py"
+# Python deps come from flake package whep-python (not pip).
+WHEP_SHARE="${HOME}/.local/share/eve"
+WHEP_WRAPPER="${WHEP_SHARE}/whep-watch-demux"
+WHEP_PY="${WHEP_SHARE}/whep-python/bin/python3"
+set_default WHEP_DEMUX_PATH "${WHEP_WRAPPER}"
 set_default STREAMPLACE_WATCH_TRANSPORT "whep"
 if [ -f "$ROOT/scripts/install-whep-deps.sh" ]; then
-  echo "[prep] installing WHEP demux Python deps ..."
-  bash "$ROOT/scripts/install-whep-deps.sh" || echo "[prep] warning: WHEP deps install failed — stream.place watch will error until fixed"
+  echo "[prep] building flake WHEP Python env (nix build .#whep-python) ..."
+  if bash "$ROOT/scripts/install-whep-deps.sh"; then
+    :
+  else
+    echo "[prep] warning: WHEP flake build failed — stream.place watch will error until fixed" >&2
+  fi
 fi
-env_set WHEP_DEMUX_PATH "${WHEP_DEMUX_PATH}"
+if [ -x "$WHEP_PY" ]; then
+  env_set WHEP_PYTHON "$WHEP_PY"
+  export WHEP_PYTHON="$WHEP_PY"
+  echo "[prep] WHEP_PYTHON=${WHEP_PYTHON}"
+else
+  echo "[prep] WHEP_PYTHON missing — run: bash scripts/install-whep-deps.sh" >&2
+fi
+if [ -x "$WHEP_WRAPPER" ]; then
+  env_set WHEP_DEMUX_PATH "$WHEP_WRAPPER"
+else
+  env_set WHEP_DEMUX_PATH "${WHEP_DEMUX_PATH}"
+fi
 env_set STREAMPLACE_WATCH_TRANSPORT "whep"
 
 # --- eve build --------------------------------------------------------------

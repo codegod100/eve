@@ -85,6 +85,7 @@ chmod +x \
   "$ROOT/scripts/run-av-bridge.sh" \
   "$ROOT/scripts/fetch-keys.sh" \
   "$ROOT/scripts/refresh-freeq-session.sh" \
+  "$ROOT/scripts/install-whep-deps.sh" \
   "$ROOT/scripts/install-systemd.sh" 2>/dev/null || true
 
 # Seed optional config files (do not overwrite secrets).

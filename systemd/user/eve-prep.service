@@ -9,13 +9,14 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 # Operator secrets for OpenBao (OPENBAO_ADDR, OPENBAO_TOKEN) — mode 0600.
 EnvironmentFile=-%h/.config/eve/openbao.env
 # Optional non-secret overrides (IRC_*, OPENCODE_MODEL, …).
 EnvironmentFile=-%h/.config/eve/config.env
 ExecStart=@ROOT@/scripts/prep.sh
-TimeoutStartSec=300
+# First nix build of whep-python (aiortc/av/ffmpeg) can be slow.
+TimeoutStartSec=1800
 
 [Install]
 WantedBy=eve.target

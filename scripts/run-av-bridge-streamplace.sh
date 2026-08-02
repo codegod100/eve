@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # stream-watch MoQ plane: stream.place WHEP → freeq (not radio, not HLS).
 set -euo pipefail
-export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="${HOME}/.local/share/eve/whep-python/bin:${HOME}/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export AV_BRIDGE_BIND="${STREAM_WATCH_AV_BRIDGE_BIND:-${STREAMPLACE_AV_BRIDGE_BIND:-127.0.0.1:8792}}"
 export AV_PLANE_ROLE=watch
 # WHEP-only policy — do not point this plane at getLivePlaylist.
 export STREAMPLACE_WATCH_TRANSPORT=whep
-export WHEP_DEMUX_PATH="${WHEP_DEMUX_PATH:-$ROOT/scripts/whep-watch-demux.py}"
+WHEP_SHARE="${HOME}/.local/share/eve"
+export WHEP_PYTHON="${WHEP_PYTHON:-$WHEP_SHARE/whep-python/bin/python3}"
+export WHEP_DEMUX_PATH="${WHEP_DEMUX_PATH:-$WHEP_SHARE/whep-watch-demux}"
+# Fall back to repo script if flake wrapper not materialized yet.
+if [ ! -x "$WHEP_DEMUX_PATH" ]; then
+  export WHEP_DEMUX_PATH="$ROOT/scripts/whep-watch-demux.py"
+fi
 # P360 freeq tile at continuous 20 fps — matches demux drop-frame in watch.rs.
 # 360p @ ~1.2Mbps stays workable on 2-core boxd without starving Opus.
 export AV_VIDEO_PRESET="${AV_VIDEO_PRESET:-360p}"
