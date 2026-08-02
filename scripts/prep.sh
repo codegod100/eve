@@ -5,7 +5,7 @@
 # Used by eve-prep.service and by start.sh (legacy / non-systemd path).
 set -euo pipefail
 
-export PATH="${HOME}/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="${HOME}/.local/bin:/run/system-manager/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

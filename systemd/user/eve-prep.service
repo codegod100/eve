@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
-Environment=PATH=%h/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/run/system-manager/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 # Operator secrets for OpenBao (OPENBAO_ADDR, OPENBAO_TOKEN) — mode 0600.
 EnvironmentFile=-%h/.config/eve/openbao.env
 # Optional non-secret overrides (IRC_*, OPENCODE_MODEL, …).

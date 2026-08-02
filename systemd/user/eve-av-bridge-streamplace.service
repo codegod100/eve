@@ -8,7 +8,7 @@ PartOf=eve.target
 Type=simple
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
-Environment=PATH=%h/.local/share/eve/whep-python/bin:%h/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/share/eve/whep-python/bin:/run/system-manager/sw/bin:%h/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 Environment=STREAMPLACE_AV_BRIDGE_BIND=127.0.0.1:8792
 Environment=AV_BRIDGE_BIND=127.0.0.1:8792
 Environment=AV_PLANE_ROLE=watch

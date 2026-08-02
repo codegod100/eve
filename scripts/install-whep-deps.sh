@@ -2,13 +2,14 @@
 # Materialize a Python env with aiortc/aiohttp/av/numpy for WHEP demux.
 # WHEP is the only stream.place watch transport — this env is required.
 #
-# Preferred:  nix build .#whep-python
+# Preferred:  system-manager (/run/system-manager/sw/bin/whep-python)
+# Next:       nix build .#whep-python
 # Fallback:   pip install --target (no nix / no python3-venv needed on boxd)
 # Roots:      ~/.local/share/eve/whep-python  (bin/python3 + libs)
 # Wrapper:    ~/.local/share/eve/whep-watch-demux
 # Exports:    WHEP_PYTHON / WHEP_DEMUX_PATH  (prep.sh → runtime.env)
 set -euo pipefail
-export PATH="${HOME}/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="${HOME}/.local/bin:/run/system-manager/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEMUX_PY="${ROOT}/scripts/whep-watch-demux.py"
@@ -17,6 +18,7 @@ SHARE="${EVE_WHEP_SHARE:-$HOME/.local/share/eve}"
 OUT_LINK="${EVE_WHEP_PYTHON_LINK:-$SHARE/whep-python}"
 WRAPPER="${EVE_WHEP_DEMUX_WRAPPER:-$SHARE/whep-watch-demux}"
 SYS_PYTHON="$(command -v python3 || true)"
+SM_BIN="${SYSTEM_MANAGER_BIN:-/run/system-manager/sw/bin}"
 
 if [ ! -f "$DEMUX_PY" ]; then
   echo "[whep-deps] missing demux script: $DEMUX_PY" >&2
@@ -40,6 +42,30 @@ write_demux_wrapper() {
 exec "${py}" "${DEMUX_PY}" "\$@"
 EOF
   chmod 755 "$WRAPPER"
+}
+
+# Point ~/.local/share/eve/whep-python/bin/python3 at an interpreter so existing
+# systemd Environment= defaults keep working.
+link_local_python() {
+  local py="$1"
+  rm -rf "$OUT_LINK"
+  mkdir -p "$OUT_LINK/bin"
+  ln -sfn "$py" "$OUT_LINK/bin/python3"
+}
+
+install_via_system_manager() {
+  local py="${SM_BIN}/whep-python"
+  if [ ! -x "$py" ]; then
+    return 1
+  fi
+  echo "[whep-deps] system-manager ${py}"
+  verify_python "$py"
+  link_local_python "$py"
+  # Always wrap the *repo* demux script so deploys pick up script edits without
+  # waiting for another system-manager switch (python env stays from SM).
+  write_demux_wrapper "$OUT_LINK/bin/python3"
+  echo "[whep-deps] WHEP_PYTHON=${OUT_LINK}/bin/python3"
+  echo "[whep-deps] WHEP_DEMUX_PATH=${WRAPPER}"
 }
 
 install_via_nix() {
@@ -92,17 +118,19 @@ EOF
   echo "[whep-deps] WHEP_DEMUX_PATH=${WRAPPER}"
 }
 
-NIX_OK=0
-if command -v nix >/dev/null 2>&1; then
+INSTALLED=0
+if install_via_system_manager; then
+  INSTALLED=1
+elif command -v nix >/dev/null 2>&1; then
   if install_via_nix; then
-    NIX_OK=1
+    INSTALLED=1
   else
     echo "[whep-deps] nix build failed — falling back to pip --target" >&2
   fi
 else
-  echo "[whep-deps] nix not found — using pip --target fallback" >&2
+  echo "[whep-deps] nix/system-manager not found — using pip --target fallback" >&2
 fi
 
-if [ "$NIX_OK" -eq 0 ]; then
+if [ "$INSTALLED" -eq 0 ]; then
   install_via_pip_target
 fi
