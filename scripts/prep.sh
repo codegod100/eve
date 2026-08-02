@@ -153,6 +153,16 @@ else
   echo "[prep] annas-mcp missing — anna_search will fail until install-annas-mcp.sh succeeds"
 fi
 
+# --- stream.place WHEP demux (watch is WHEP-only; never HLS) -----------------
+set_default WHEP_DEMUX_PATH "${ROOT}/scripts/whep-watch-demux.py"
+set_default STREAMPLACE_WATCH_TRANSPORT "whep"
+if [ -f "$ROOT/scripts/install-whep-deps.sh" ]; then
+  echo "[prep] installing WHEP demux Python deps ..."
+  bash "$ROOT/scripts/install-whep-deps.sh" || echo "[prep] warning: WHEP deps install failed — stream.place watch will error until fixed"
+fi
+env_set WHEP_DEMUX_PATH "${WHEP_DEMUX_PATH}"
+env_set STREAMPLACE_WATCH_TRANSPORT "whep"
+
 # --- eve build --------------------------------------------------------------
 echo "[prep] building eve ..."
 npx eve build

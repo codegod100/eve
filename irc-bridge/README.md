@@ -54,6 +54,9 @@ node irc-bridge/server.mjs
 | `RADIO_ANNOUNCE_MS` | poll interval for title changes (default `2000`) |
 | `STREAMPLACE_API` | stream.place XRPC base (default `https://stream.place`) |
 | `STREAMPLACE_AUTO` | `1` = restore last saved `watch` on boot (no pref → idle) |
+| `STREAMPLACE_WATCH_TRANSPORT` | always `whep` (HLS fallback is forbidden) |
+| `STREAMPLACE_WHEP_RENDITION` | WHEP rendition query (default `source`) |
+| `WHEP_DEMUX_PATH` | `scripts/whep-watch-demux.py` (set by prep/systemd) |
 | `STREAMPLACE_RTMP_URL` | publish ingest base (default `rtmps://stream.place:1935/live`) |
 | `STREAMPLACE_STREAM_KEY` | required for **publish** (from stream.place dashboard) |
 | `STREAMPLACE_PUBLISH_HANDLE` | optional public handle for go-live notices |
@@ -63,7 +66,7 @@ node irc-bridge/server.mjs
 | Plane | Port | Role | Control |
 |-------|------|------|---------|
 | radio | `:8790` | internet radio only | `/v1/radio/*` |
-| stream-watch | `:8792` | stream.place HLS → freeq | `/v1/watch/*` |
+| stream-watch | `:8792` | stream.place **WHEP** → freeq | `/v1/watch/*` |
 | stream-broadcast | `:8793` | freeq call → stream.place RTMP | `/v1/call-egress/*` |
 
 Only **one** freeq tile plays at a time: starting radio, watch, or broadcast

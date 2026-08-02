@@ -1,0 +1,245 @@
+diff --git a/eve-av-bridge/src/watch.rs b/eve-av-bridge/src/watch.rs
+index a88bf46..03f8c72 100644
+--- a/eve-av-bridge/src/watch.rs
++++ b/eve-av-bridge/src/watch.rs
+@@ -435,6 +435,81 @@ pub fn start_watch(
+ }
+ 
+ 
++fn spawn_stderr_logger(mut err: impl Read + Send + 'static) {
++    std::thread::spawn(move || {
++        let mut buf = [0u8; 2048];
++        loop {
++            match err.read(&mut buf) {
++                Ok(0) | Err(_) => break,
++                Ok(n) => {
++                    let line = String::from_utf8_lossy(&buf[..n]);
++                    for l in line.lines() {
++                        if !l.trim().is_empty() {
++                            info!(target: "whep_demux", "{l}", l = l);
++                        }
++                    }
++                }
++            }
++        }
++    });
++}
++
++/// Block until demux prints `WHEP_READY` on stderr, or fail if it exits / times out.
++fn wait_whep_ready(
++    stderr: &mut impl Read,
++    child: &mut std::process::Child,
++    timeout: Duration,
++) -> Result<()> {
++    use std::io::BufRead;
++    use std::os::unix::io::AsRawFd;
++    let deadline = Instant::now() + timeout;
++    let mut reader = std::io::BufReader::new(stderr);
++    let mut line = String::new();
++    let fd = reader.get_ref().as_raw_fd();
++    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
++    if flags >= 0 {
++        unsafe {
++            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
++        }
++    }
++    loop {
++        if Instant::now() >= deadline {
++            let _ = child.kill();
++            let _ = child.wait();
++            bail!("WHEP demux timed out waiting for WHEP_READY (fix demux/deps/ICE — do not fall back to HLS)");
++        }
++        match child.try_wait() {
++            Ok(Some(status)) => {
++                let mut rest = String::new();
++                let _ = reader.read_to_string(&mut rest);
++                bail!(
++                    "WHEP demux exited before ready ({status}): {}",
++                    rest.chars().take(400).collect::<String>()
++                );
++            }
++            Ok(None) => {}
++            Err(e) => bail!("WHEP demux wait: {e}"),
++        }
++        line.clear();
++        match reader.read_line(&mut line) {
++            Ok(0) => std::thread::sleep(Duration::from_millis(40)),
++            Ok(_) => {
++                let t = line.trim();
++                if !t.is_empty() {
++                    info!(target: "whep_demux", "{t}", t = t);
++                }
++                if t == "WHEP_READY" || t.ends_with("WHEP_READY") {
++                    return Ok(());
++                }
++            }
++            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
++                std::thread::sleep(Duration::from_millis(40));
++            }
++            Err(e) => bail!("WHEP demux stderr: {e}"),
++        }
++    }
++}
++
+ fn start_whep_watch(
+     url: String,
+     speaker: Speaker,
+@@ -442,64 +517,108 @@ fn start_whep_watch(
+     tile: WatchTile,
+ ) -> Result<WatchHandle> {
+     let demux = which_whep_demux()?;
++    if !url.to_ascii_lowercase().contains("place.stream.playback.whep") {
++        bail!("WHEP-only: watch url must be place.stream.playback.whep (no HLS)");
++    }
+     let stop = Arc::new(AtomicBool::new(false));
+     let run_dir = std::env::temp_dir().join(format!("eve-watch-{}", uuid::Uuid::new_v4()));
+     fs::create_dir_all(&run_dir).with_context(|| format!("create {}", run_dir.display()))?;
+ 
++    // Gate the first demux generation synchronously so /v1/watch/play cannot
++    // report ok:true while Python deps are missing or WHEP negotiate fails.
++    // Demux prints WHEP_READY after SDP answer and before opening the video fifo.
++    let video_fifo0 = run_dir.join("v.rgba");
++    let _ = fs::remove_file(&video_fifo0);
++    mkfifo(&video_fifo0)?;
++    let fifo_str0 = video_fifo0
++        .to_str()
++        .map(str::to_string)
++        .context("whep fifo path not utf8")?;
++
++    let mut child0 = StdCommand::new(&demux)
++        .args(["--whep-url", &url, "--video-fifo", &fifo_str0])
++        .stdin(StdStdio::null())
++        .stdout(StdStdio::piped())
++        .stderr(StdStdio::piped())
++        .spawn()
++        .with_context(|| format!("spawn whep demux {demux}"))?;
++
++    let mut stderr0 = child0.stderr.take().context("whep demux stderr")?;
++    if let Err(e) = wait_whep_ready(&mut stderr0, &mut child0, Duration::from_secs(30)) {
++        let _ = child0.kill();
++        let _ = child0.wait();
++        let _ = fs::remove_file(&video_fifo0);
++        return Err(e);
++    }
++    info!(%url, "WHEP_READY");
++    spawn_stderr_logger(stderr0);
++
+     let stop_task = stop.clone();
+     let run_dir_task = run_dir.clone();
++    let first_child = Arc::new(Mutex::new(Some(child0)));
++    let first_fifo = Arc::new(Mutex::new(Some(video_fifo0)));
+ 
+     let task = tokio::spawn(async move {
+-        info!(%url, demux = %demux, "watch demux WHEP (WebRTC → rgba + f32le)");
++        info!(%url, demux = %demux, "watch demux WHEP steady-state");
+         let alive_flag = Arc::new(AtomicBool::new(true));
++        let mut use_first = true;
+ 
+         while !stop_task.load(Ordering::Relaxed) && *session_alive.borrow() {
+-            let video_fifo = run_dir_task.join("v.rgba");
+-            let _ = fs::remove_file(&video_fifo);
+-            if let Err(e) = mkfifo(&video_fifo) {
+-                warn!(error = %e, "whep mkfifo");
+-                tokio::time::sleep(Duration::from_millis(500)).await;
+-                continue;
+-            }
+-            let Some(fifo_str) = video_fifo.to_str().map(str::to_string) else {
+-                warn!("whep fifo path not utf8");
+-                break;
+-            };
+-
+-            // std::process so audio thread can take ChildStdout (AsRawFd + Read).
+-            let mut child = match StdCommand::new(&demux)
+-                .args(["--whep-url", &url, "--video-fifo", &fifo_str])
+-                .stdin(StdStdio::null())
+-                .stdout(StdStdio::piped())
+-                .stderr(StdStdio::piped())
+-                .spawn()
+-            {
+-                Ok(c) => c,
+-                Err(e) => {
+-                    warn!(error = %e, "spawn whep demux");
++            let (mut child, video_fifo) = if use_first {
++                use_first = false;
++                let child = first_child
++                    .lock()
++                    .expect("first_child")
++                    .take()
++                    .expect("first whep child");
++                let video_fifo = first_fifo
++                    .lock()
++                    .expect("first_fifo")
++                    .take()
++                    .expect("first whep fifo");
++                (child, video_fifo)
++            } else {
++                let video_fifo = run_dir_task.join("v.rgba");
++                let _ = fs::remove_file(&video_fifo);
++                if let Err(e) = mkfifo(&video_fifo) {
++                    warn!(error = %e, "whep mkfifo");
+                     tokio::time::sleep(Duration::from_millis(500)).await;
+                     continue;
+                 }
+-            };
+-
+-            if let Some(mut err) = child.stderr.take() {
+-                std::thread::spawn(move || {
+-                    let mut buf = [0u8; 2048];
+-                    loop {
+-                        match err.read(&mut buf) {
+-                            Ok(0) | Err(_) => break,
+-                            Ok(n) => {
+-                                let line = String::from_utf8_lossy(&buf[..n]);
+-                                for l in line.lines() {
+-                                    if !l.trim().is_empty() {
+-                                        info!(target: "whep_demux", "{l}", l = l);
+-                                    }
+-                                }
+-                            }
++                let Some(fifo_str) = video_fifo.to_str().map(str::to_string) else {
++                    warn!("whep fifo path not utf8");
++                    break;
++                };
++                let mut child = match StdCommand::new(&demux)
++                    .args(["--whep-url", &url, "--video-fifo", &fifo_str])
++                    .stdin(StdStdio::null())
++                    .stdout(StdStdio::piped())
++                    .stderr(StdStdio::piped())
++                    .spawn()
++                {
++                    Ok(c) => c,
++                    Err(e) => {
++                        warn!(error = %e, "spawn whep demux");
++                        tokio::time::sleep(Duration::from_millis(500)).await;
++                        continue;
++                    }
++                };
++                if let Some(mut err) = child.stderr.take() {
++                    // Restart generations: require READY again before pumps.
++                    match wait_whep_ready(&mut err, &mut child, Duration::from_secs(30)) {
++                        Ok(()) => spawn_stderr_logger(err),
++                        Err(e) => {
++                            warn!(error = %e, "whep restart not ready");
++                            let _ = child.kill();
++                            let _ = child.wait();
++                            let _ = fs::remove_file(&video_fifo);
++                            tokio::time::sleep(Duration::from_millis(500)).await;
++                            continue;
+                         }
+                     }
+-                });
+-            }
++                }
++                (child, video_fifo)
++            };
+ 
+             let stop_a = stop_task.clone();
+             let alive_a = alive_flag.clone();
+@@ -583,7 +702,6 @@ fn start_whep_watch(
+     })
+ }
+ 
+-
+ fn set_pipe_size(file: &std::fs::File, want: usize) {
+     use std::os::unix::io::AsRawFd;
+     // Linux fcntl F_SETPIPE_SZ / F_GETPIPE_SZ

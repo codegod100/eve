@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Streamplace WHEP → eve watch raw pipes (RGBA tile + f32le mono PCM).
 
+stream.place watch is WHEP-only — do not add HLS fallback here. If this demux
+is flaky, fix WHEP (deps, SDP, rendition, ICE). Emit WHEP_READY on stderr after
+a successful WHEP answer so eve-av-bridge can fail play instead of zombie-ok.
+
 Drop-to-live + frame-aligned fifo:
   - Decode continuously; keep only the newest VideoFrame.
   - Letterbox/scale ONLY the latest frame when writing.
@@ -18,15 +22,23 @@ import os
 import signal
 import sys
 from typing import Optional
-from urllib.parse import urljoin
-
-import aiohttp
-import av
-import numpy as np
-from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
-from av.audio.resampler import AudioResampler
+from urllib.parse import parse_qs, urljoin, urlparse
 
 LOG = logging.getLogger("whep-demux")
+
+try:
+    import aiohttp
+    import av
+    import numpy as np
+    from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+    from av.audio.resampler import AudioResampler
+except ImportError as e:
+    sys.stderr.write(
+        "WHEP_DEPS_MISSING: %s\n"
+        "Install with: bash scripts/install-whep-deps.sh "
+        "(or pip install --user -r scripts/requirements-whep.txt)\n" % e
+    )
+    raise SystemExit(2) from e
 
 WATCH_W = 640
 WATCH_H = 360
@@ -308,6 +320,8 @@ async def run(whep_url: str, video_fifo: str) -> int:
             session_url = resp.headers.get("Location")
             await pc.setRemoteDescription(RTCSessionDescription(sdp=body, type="answer"))
             LOG.info("WHEP answer ok session=%s", session_url)
+            # Machine-readable ready gate for eve-av-bridge (do not remove).
+            print("WHEP_READY", file=sys.stderr, flush=True)
 
         while not stop.is_set():
             await asyncio.sleep(0.25)
@@ -334,6 +348,24 @@ async def run(whep_url: str, video_fifo: str) -> int:
     return 0
 
 
+def _require_whep_url(url: str) -> str:
+    """stream.place WHEP requires streamer + rendition query params."""
+    u = url.strip()
+    if not u.lower().startswith(("http://", "https://")):
+        raise SystemExit("WHEP url must be http(s)")
+    if "place.stream.playback.whep" not in u.lower():
+        raise SystemExit(
+            "WHEP-only: url must be place.stream.playback.whep "
+            "(HLS/getLivePlaylist is not allowed for stream.place watch)"
+        )
+    qs = parse_qs(urlparse(u).query)
+    if not qs.get("streamer"):
+        raise SystemExit("WHEP url missing required query param: streamer")
+    if not qs.get("rendition"):
+        raise SystemExit("WHEP url missing required query param: rendition")
+    return u
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--whep-url", required=True)
@@ -347,8 +379,9 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+    whep_url = _require_whep_url(args.whep_url)
     try:
-        return asyncio.run(run(args.whep_url, args.video_fifo))
+        return asyncio.run(run(whep_url, args.video_fifo))
     except KeyboardInterrupt:
         return 0
 
