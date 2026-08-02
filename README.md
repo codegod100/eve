@@ -183,24 +183,18 @@ npm run boxd:start                # systemctl --user start eve.target
 
 ### CI deploy (merge → eve.boxd.sh)
 
-Pushing (or merging) to `main` runs [`.github/workflows/deploy-boxd.yml`](.github/workflows/deploy-boxd.yml):
-it reads `BOXD_API_KEY` from OpenBao (`secret/data/ai-api-keys`), wakes the `eve` VM,
-`git reset --hard`s `/home/boxd/my-agent` to the merge SHA, then runs
-`scripts/deploy-boxd.sh` (`npm ci` + `scripts/start.sh`).
-
-| Where | What |
-|-------|------|
-| GitHub secret `OPENBAO_TOKEN` | Lets Actions read OpenBao |
-| OpenBao `ai-api-keys` → `BOXD_API_KEY` | raw `bxd_…` API key (CI exchanges it for a session token) |
-
-Refresh the boxd key (raw value shown only once) and write it into OpenBao:
+Pushing (or merging) to `main` hits the boxd deploy webhook on the eve VM
+(`https://hooks.eve.boxd.sh/hooks/deploy`). The VM `git fetch`es `/home/boxd/my-agent`
+and runs `scripts/deploy-boxd.sh` (reload or `npm ci` + restart). No GitHub Actions
+runner and no `BOXD_API_KEY` round-trip.
 
 ```bash
-KEY=$(boxd auth keys create "gh-actions deploy codegod100/eve")
-# upsert BOXD_API_KEY=$KEY on secret/data/ai-api-keys at openbao.boxd.sh
+# deploy log on the VM
+boxd machine exec eve -- sudo tail -f /var/log/golden-deploy.log
 ```
 
-Manual redeploy: Actions → **Deploy to eve.boxd.sh** → Run workflow.
+[`.github/workflows/deploy-boxd.yml`](.github/workflows/deploy-boxd.yml) only checks
+that the hook endpoint is reachable.
 
 Legacy (no units): `bash scripts/start.sh --legacy` (prep + nohup bridge + foreground eve).
 
