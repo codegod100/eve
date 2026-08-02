@@ -1908,10 +1908,12 @@ function isFreeqSessionActive(state) {
 
 /**
  * Pick the freeq AV session we should join on this channel.
- * freeq can list multiple Active rows after thrash. Score:
- *   1. humans (non-us) on the roster — never sit alone while nandi is elsewhere
- *   2. channel's official `active` (what freeq clients "Join existing" uses)
- *   3. larger rooms / first-listed
+ *
+ * freeq clients' "Join existing" only uses the channel's official `active`.
+ * Never prefer an unofficial DB-`recent` Active row (often ghost nicks) over
+ * that — media-follow used to chase those orphans and abandon the official
+ * room, ending it and leaving active=null again.
+ *
  * @returns {Promise<string | null>}
  */
 async function discoverActiveSession(channel) {
@@ -1928,70 +1930,22 @@ async function discoverActiveSession(channel) {
           : null
         : null;
 
-    // freeq clients' "Join existing" only looks at `active`. After server
-    // thrash / ended-child sessions, `active` can be null while DB `recent`
-    // still lists state:"Active" orphans. Joining those orphans leaves eve
-    // publishing into a room nobody can discover → MoQ video never gets a
-    // subscriber (vshr parked, popped=0, black tile). Prefer av-start.
-    if (!channelActiveId) {
-      const orphanActive = (
-        Array.isArray(json?.recent) ? json.recent : []
-      ).filter((r) => isFreeqSessionActive(r?.state));
-      if (orphanActive.length) {
-        log(
-          `discover session: no official active on ${channel} but ${orphanActive.length} orphaned Active in recent — start fresh so clients can Join existing`,
-        );
-      }
-      return null;
-    }
-
-    /** @type {string[]} */
-    const ids = [];
-    const pushId = (id) => {
-      if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
-    };
-    // Prefer scanning the official active first.
-    pushId(channelActiveId);
-    for (const r of Array.isArray(json?.recent) ? json.recent : []) {
-      if (isFreeqSessionActive(r?.state)) pushId(r?.id);
-    }
-    if (!ids.length) return null;
-
-    const me = String(irc.nick || "").toLowerCase();
-    /** @type {{ id: string, others: number, total: number, official: boolean, score: number }[]} */
-    const scored = [];
-    for (const id of ids.slice(0, 8)) {
-      try {
-        const data = await fetchSessionRoster(id);
-        if (data?.state !== undefined && !isFreeqSessionActive(data.state)) {
-          continue;
-        }
-        const parts = Array.isArray(data?.participants)
-          ? data.participants
-          : [];
-        const total = parts.length;
-        const others = parts.filter(
-          (p) => String(p?.nick ?? "").toLowerCase() !== me,
-        ).length;
-        const official = id === channelActiveId;
-        // Humans dominate. Official channel active beats eve-only zombies.
-        const score = others * 1_000_000 + (official ? 10_000 : 0) + total;
-        scored.push({ id, others, total, official, score });
-      } catch (e) {
-        log(`discover roster ${id}: ${e instanceof Error ? e.message : e}`);
-      }
-    }
-    if (!scored.length) {
+    if (channelActiveId) {
+      log(`discover session: official active ${channelActiveId}`);
       return channelActiveId;
     }
-    scored.sort((a, b) => b.score - a.score);
-    const best = scored[0];
-    if (scored.length > 1 || best.others > 0 || best.official) {
+
+    // active=null while recent still lists state:"Active" orphans — start fresh
+    // so channel_sessions rebinds and clients can Join existing.
+    const orphanActive = (
+      Array.isArray(json?.recent) ? json.recent : []
+    ).filter((r) => isFreeqSessionActive(r?.state));
+    if (orphanActive.length) {
       log(
-        `discover session: ${best.id} (others=${best.others} total=${best.total} official=${best.official}) among ${scored.length}`,
+        `discover session: no official active on ${channel} but ${orphanActive.length} orphaned Active in recent — start fresh so clients can Join existing`,
       );
     }
-    return best.id;
+    return null;
   } catch (e) {
     log(`discover session failed: ${e instanceof Error ? e.message : e}`);
     return null;
@@ -2222,6 +2176,27 @@ async function ensureAvUnlocked(
 
   // freeq thrash left multiple Active rooms — leave our ghosts on the others.
   void leaveOtherChannelSessions(ch, sessionId);
+
+  // Confirm clients can Join existing (official active must be our room).
+  void (async () => {
+    try {
+      const enc = encodeURIComponent(ch);
+      const res = await fetch(`${FREEQ_API_BASE}/api/v1/channels/${enc}/sessions`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) return;
+      const j = await res.json();
+      const official =
+        j?.active && isFreeqSessionActive(j.active.state) ? j.active.id : null;
+      if (official !== sessionId) {
+        log(
+          `ensureAv WARN: joined ${sessionId} but channel official active=${official ?? "null"} — clients may not Join existing`,
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+  })();
 
   return {
     sessionId,
