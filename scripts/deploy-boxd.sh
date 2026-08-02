@@ -9,7 +9,7 @@
 #   boxd machine exec eve -- …
 set -euo pipefail
 
-export PATH="${HOME}/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="${HOME}/.local/bin:/run/system-manager/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 # Non-interactive boxd exec shells often lack a user systemd session.
 if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
@@ -57,8 +57,19 @@ if systemctl --user cat eve.target >/dev/null 2>&1; then
   bash "$ROOT/scripts/install-systemd.sh" --no-enable
 fi
 
+# Declarative host packages (whep-python, jq, …) when multi-user Nix is present.
+# Failures are non-fatal — install-whep-deps still has nix-build / pip fallbacks.
+if command -v nix >/dev/null 2>&1 && [ -x "$ROOT/scripts/system-manager-switch.sh" ]; then
+  echo "[deploy] system-manager switch ..."
+  if bash "$ROOT/scripts/system-manager-switch.sh"; then
+    echo "[deploy] system-manager ok"
+  else
+    echo "[deploy] system-manager switch failed — continuing with whep-deps fallbacks" >&2
+  fi
+fi
+
 # Install WHEP demux Python before restart so irc-bridge's ready-gate passes
-# even if eve-prep later warns. Nix preferred; pip --target on bare boxd.
+# even if eve-prep later warns. Prefers system-manager, then nix build, then pip.
 echo "[deploy] ensuring WHEP Python deps ..."
 bash "$ROOT/scripts/install-whep-deps.sh"
 

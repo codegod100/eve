@@ -9,7 +9,7 @@ PartOf=eve.target
 Type=simple
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/run/system-manager/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/.config/eve/runtime.env
 Environment=AV_PLANE_ROLE=radio
 EnvironmentFile=-%h/.config/eve/config.env

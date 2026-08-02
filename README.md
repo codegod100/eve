@@ -21,8 +21,9 @@ agent/
 irc-bridge/
   server.mjs         # freeq IRC → POST /irc/inbound ; SSE /irc/out → PRIVMSG
 systemd/user/        # user unit templates (eve, irc-bridge, optional av-bridge + streamplace plane (:8792))
+nix/system-manager/  # boxd host packages via numtide system-manager (whep-python, …)
 scripts/
-  prep.sh, start.sh, install-systemd.sh, fetch-keys.sh, sync-freeq-session.mjs
+  prep.sh, start.sh, install-systemd.sh, system-manager-switch.sh, fetch-keys.sh, sync-freeq-session.mjs
 flake.nix
 ```
 
@@ -165,15 +166,20 @@ npm install
 export OPENCODE_API_KEY=…   # or other provider keys
 npm run dev
 # stream.place watch deps (also run by prep on boxd):
-bash scripts/install-whep-deps.sh   # nix preferred; pip --target on bare boxd
+bash scripts/install-whep-deps.sh   # system-manager → nix → pip --target
 ```
 
 ## Boxd (eve.boxd.sh)
 
 On the VM, secrets come from OpenBao. **Production path uses systemd user units**
 (`eve`, `eve-irc-bridge`, optional `eve-av-bridge`) — see [`systemd/README.md`](systemd/README.md).
+Host packages (WHEP python, jq, …) are declared with **system-manager** —
+see [`nix/system-manager/README.md`](nix/system-manager/README.md).
 
 ```bash
+# once: multi-user Nix, then host packages
+bash scripts/system-manager-switch.sh
+
 export OPENBAO_ADDR=https://openbao.boxd.sh
 export OPENBAO_TOKEN=…      # boxd secret / service token
 npm install

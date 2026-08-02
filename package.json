@@ -19,6 +19,7 @@
     "systemd:start": "systemctl --user start eve.target",
     "systemd:stop": "systemctl --user stop eve.target",
     "systemd:status": "systemctl --user --no-pager status eve.target eve.service eve-irc-bridge.service",
+    "system-manager:switch": "bash scripts/system-manager-switch.sh",
     "boxd:start": "bash scripts/start.sh"
   },
   "dependencies": {

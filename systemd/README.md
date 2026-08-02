@@ -15,6 +15,16 @@ Long-running processes are supervised by **systemd user units**, not `nohup`.
 
 Identity: handle **`eve.boxd.sh`**, PDS **`https://pds.eve.boxd.sh`**, DID from `~/.config/rook/identity.json`.
 
+## Host packages (system-manager)
+
+On boxd, prefer [numtide system-manager](../nix/system-manager/README.md) for
+`whep-python` / `whep-watch-demux` on `/run/system-manager/sw/bin` (units already
+include that PATH). User units below still supervise the agent stack.
+
+```bash
+bash scripts/system-manager-switch.sh   # once + after host-package changes
+```
+
 ## Install (boxd or local)
 
 ```bash
