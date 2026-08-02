@@ -134,8 +134,11 @@ curl -sS -X POST http://127.0.0.1:8791/streamplace/play -H 'content-type: applic
 curl -sS -X POST http://127.0.0.1:8791/streamplace/stop
 ```
 
-Picks `place.stream.live.getLiveUsers` sorted by `viewerCount`, plays HLS via
-`place.stream.playback.getLivePlaylist?streamer=<did>` through ffmpeg → MoQ.
+Picks `place.stream.live.getLiveUsers` sorted by `viewerCount`, plays **WHEP**
+via `place.stream.playback.whep?streamer=<did>&rendition=source` through
+`scripts/whep-watch-demux.py` → MoQ. **WHEP only** — do not add an HLS
+fallback; if watch is broken, fix demux/deps (`scripts/install-whep-deps.sh`)
+or the freeq `WHEP_READY` gate (see `patches/freeq-whep-ready-gate.patch`).
 
 ### stream.place publish plane (inverse / call rebroadcast)
 

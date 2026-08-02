@@ -1,0 +1,24 @@
+---
+description: stream.place watch must use WHEP only — never HLS fallback
+globs:
+  - irc-bridge/**
+  - scripts/whep-watch-demux.py
+  - scripts/*streamplace*
+  - agent/tools/watch_stream.ts
+  - systemd/**/*streamplace*
+  - av-bridge/**
+---
+
+# stream.place watch = WHEP only
+
+stream.place → freeq ingest is **WHEP (WebRTC)** only.
+
+- Do **not** add HLS / `getLivePlaylist` fallback for stream.place watch.
+- Do **not** "fix flakiness" by switching transport to HLS.
+- If WHEP is broken or flaky, **fix the root cause** in the WHEP path:
+  - `scripts/whep-watch-demux.py` (aiortc demux)
+  - `eve-av-bridge` watch plane (`/v1/watch/play` with a WHEP URL)
+  - Python deps (`scripts/requirements-whep.txt`)
+  - rendition / DID / SDP negotiate errors from `place.stream.playback.whep`
+- Prefer failing loudly with a clear error over silent empty media.
+- `STREAMPLACE_WATCH_TRANSPORT` must remain `whep` (or unset → whep). Do not introduce an HLS default.

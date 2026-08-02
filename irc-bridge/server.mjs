@@ -16,6 +16,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
+import { fileURLToPath } from "node:url";
 import {
   startVoiceSession,
   stopVoiceSession,
@@ -196,6 +197,50 @@ async function streamplaceAlreadyPlaying() {
   } catch {
     return false;
   }
+}
+
+function streamplaceWhepUrl(streamerId) {
+  const rendition = process.env.STREAMPLACE_WHEP_RENDITION || "source";
+  return (
+    `${STREAMPLACE_API}/xrpc/place.stream.playback.whep` +
+    `?streamer=${encodeURIComponent(streamerId)}` +
+    `&rendition=${encodeURIComponent(rendition)}`
+  );
+}
+
+/**
+ * Fail loud before /v1/watch/play if WHEP demux deps/script are missing.
+ * Root-cause gate — never paper over with HLS.
+ */
+function assertWhepDemuxReady() {
+  const demux =
+    process.env.WHEP_DEMUX_PATH ||
+    path.join(
+      process.env.EVE_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+      "scripts/whep-watch-demux.py",
+    );
+  if (!fs.existsSync(demux)) {
+    throw new Error(
+      `WHEP demux missing: ${demux}. Deploy scripts/whep-watch-demux.py and set WHEP_DEMUX_PATH.`,
+    );
+  }
+  const py = child_process.spawnSync(
+    process.env.WHEP_PYTHON || "python3",
+    [
+      "-c",
+      "import aiortc,aiohttp,av,numpy; print('ok')",
+    ],
+    { encoding: "utf8", timeout: 15_000 },
+  );
+  if (py.status !== 0) {
+    const detail = (py.stderr || py.stdout || "").trim().slice(0, 300);
+    throw new Error(
+      `WHEP Python deps missing (aiortc/aiohttp/av/numpy). ` +
+        `Run: bash scripts/install-whep-deps.sh` +
+        (detail ? ` (${detail})` : ""),
+    );
+  }
+  return demux;
 }
 
 /** freeq REST (session discovery). Default from IRC host. */
@@ -2195,15 +2240,15 @@ async function pickTopStreamplaceStream() {
   const title = top?.record?.title ?? handle;
   const count = viewers(top);
   if (!did) throw new Error("top stream missing author.did");
-  const hls = `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(did)}`;
-  const whep = `${STREAMPLACE_API}/xrpc/place.stream.playback.whep?streamer=${encodeURIComponent(did)}&rendition=${encodeURIComponent(process.env.STREAMPLACE_WHEP_RENDITION || "source")}`;
+  const whep = streamplaceWhepUrl(did);
   return {
     did,
     handle,
     title: String(title),
     viewers: count,
     url: top?.record?.url ?? `https://stream.place/${did}`,
-    hls,
+    // hls retained on the object for diagnostics only — watch play never uses it.
+    hls: `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(did)}`,
     whep,
     ranked: streams.slice(0, 5).map((s) => ({
       handle: s?.author?.handle,
@@ -2331,7 +2376,7 @@ async function playStreamplace({ channel, streamer } = {}) {
       viewers: null,
       url: `https://stream.place/${id}`,
       hls: `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(id)}`,
-      whep: `${STREAMPLACE_API}/xrpc/place.stream.playback.whep?streamer=${encodeURIComponent(id)}&rendition=${encodeURIComponent(process.env.STREAMPLACE_WHEP_RENDITION || "source")}`,
+      whep: streamplaceWhepUrl(id),
       ranked: [],
     };
     // Resolve handle for nicer logs if we only got a handle.
@@ -2373,7 +2418,7 @@ async function playStreamplace({ channel, streamer } = {}) {
             hit?.record?.url ?? `https://stream.place/${picked.did || id}`;
           const streamerId = picked.did || id;
           picked.hls = `${STREAMPLACE_API}/xrpc/place.stream.playback.getLivePlaylist?streamer=${encodeURIComponent(streamerId)}`;
-          picked.whep = `${STREAMPLACE_API}/xrpc/place.stream.playback.whep?streamer=${encodeURIComponent(streamerId)}&rendition=${encodeURIComponent(process.env.STREAMPLACE_WHEP_RENDITION || "source")}`;
+          picked.whep = streamplaceWhepUrl(streamerId);
         }
       }
     } catch (e) {
@@ -2406,46 +2451,48 @@ async function playStreamplace({ channel, streamer } = {}) {
     av = { channel: ch, error: String(e) };
   }
 
-  // stream-watch plane only — never radio/play.
-  // Prefer WHEP (low-latency WebRTC); fall back to HLS if play fails.
-  const preferWhep = process.env.STREAMPLACE_WATCH_TRANSPORT !== "hls";
-  const playUrls = preferWhep
-    ? [picked.whep || picked.hls, picked.hls].filter(Boolean)
-    : [picked.hls, picked.whep].filter(Boolean);
+  // stream-watch plane only — WHEP only (never HLS / getLivePlaylist).
+  // If WHEP is flaky, fix demux/deps/av-bridge — do not add a transport fallback.
+  if (
+    process.env.STREAMPLACE_WATCH_TRANSPORT &&
+    process.env.STREAMPLACE_WATCH_TRANSPORT !== "whep"
+  ) {
+    log(
+      `streamplace: ignoring STREAMPLACE_WATCH_TRANSPORT=${process.env.STREAMPLACE_WATCH_TRANSPORT} (WHEP-only policy)`,
+    );
+  }
+  const streamerId = picked.did || picked.handle;
+  const whepUrl = picked.whep || streamplaceWhepUrl(streamerId);
+  if (!String(whepUrl).includes("playback.whep")) {
+    throw new Error(
+      `WHEP-only: refusing non-WHEP watch url (${String(whepUrl).slice(0, 120)})`,
+    );
+  }
+  assertWhepDemuxReady();
+
   let res;
-  let json = {};
-  let usedUrl = playUrls[0];
-  let lastErr = null;
-  for (const playUrl of playUrls) {
-    usedUrl = playUrl;
-    try {
-      res = await fetch(`${STREAM_WATCH_AV_BRIDGE_URL}/v1/watch/play`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: playUrl }),
-        signal: AbortSignal.timeout(60_000),
-      });
-    } catch (e) {
-      const cause = e instanceof Error ? e.message : String(e);
-      throw new Error(
-        `watch plane unreachable (${STREAM_WATCH_AV_BRIDGE_URL}): ${cause}. ` +
-          `Is eve-av-bridge-streamplace running?`,
-      );
-    }
-    json = await res.json().catch(() => ({}));
-    if (res.ok && json.ok !== false) {
-      log(
-        `streamplace watch transport=${String(playUrl).includes("playback.whep") ? "whep" : "hls"}`,
-      );
-      lastErr = null;
-      break;
-    }
-    lastErr = json.error || `stream-watch /v1/watch/play ${res.status}`;
-    log(`streamplace watch play failed (${lastErr}); trying next transport`);
+  try {
+    res = await fetch(`${STREAM_WATCH_AV_BRIDGE_URL}/v1/watch/play`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: whepUrl }),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (e) {
+    const cause = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `watch plane unreachable (${STREAM_WATCH_AV_BRIDGE_URL}): ${cause}. ` +
+        `Is eve-av-bridge-streamplace running?`,
+    );
   }
-  if (lastErr) {
-    throw new Error(lastErr);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json.ok === false) {
+    throw new Error(
+      json.error ||
+        `stream-watch WHEP /v1/watch/play ${res.status} — fix WHEP root cause (demux/deps/rendition), do not fall back to HLS`,
+    );
   }
+  log(`streamplace watch transport=whep url=${whepUrl.slice(0, 160)}`);
 
   // Keep following freeq rooms for the whole watch lifetime (not just ~30s).
   // freeq clients thrash rooms; without this, eve ends alone in a zombie
@@ -2454,7 +2501,7 @@ async function playStreamplace({ channel, streamer } = {}) {
     channel: ch,
     bridgeUrl: STREAMPLACE_AV_BRIDGE_URL,
     title: title.slice(0, 120),
-    radioUrl: usedUrl,
+    radioUrl: whepUrl,
   });
 
   // Optional channel notice (once per start).

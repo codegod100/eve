@@ -61,7 +61,7 @@ user → eve play_radio → irc-bridge :8791 /radio/play
                             └─ eve-av-bridge :8790
                                    └─ ffmpeg → PCM → MoQ SFU
 
-watch:  stream.place HLS → av-bridge :8792 → freeq MoQ
+watch:  stream.place WHEP only → av-bridge :8792 → freeq MoQ
 publish: freeq/source URL → ffmpeg RTMP → stream.place (inverse)
 ```
 
