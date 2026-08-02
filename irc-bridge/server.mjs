@@ -1745,6 +1745,9 @@ process.on("SIGINT", () => {
  */
 const activePlanes = new Map();
 
+/** Serialize ensureAv so concurrent watch/radio/follow ticks cannot double av-start. */
+let ensureAvChain = Promise.resolve();
+
 function planeKey(url) {
   return String(url ?? "").replace(/\/$/, "");
 }
@@ -2040,6 +2043,24 @@ async function ensureAv(
   bridgeUrl = AV_BRIDGE_URL,
   { force = false } = {},
 ) {
+  const next = ensureAvChain.then(
+    () => ensureAvUnlocked(channel, title, bridgeUrl, { force }),
+    () => ensureAvUnlocked(channel, title, bridgeUrl, { force }),
+  );
+  // Keep the serial chain alive even if one ensureAv fails.
+  ensureAvChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+async function ensureAvUnlocked(
+  channel = IRC_CHANNEL,
+  title = "eve radio",
+  bridgeUrl = AV_BRIDGE_URL,
+  { force = false } = {},
+) {
   const ch = channel.startsWith("#") ? channel : `#${channel}`;
   const bridge = planeKey(bridgeUrl || AV_BRIDGE_URL);
   // freeq records the IRC nick at av_join time. Guest* nicks break MoQ mesh
@@ -2146,7 +2167,10 @@ async function ensureAv(
     );
     irc.avJoin(ch, sessionId, instance);
   } else {
-    // No live room — start one. Prefer joining humans who already started.
+    // No official active — start one. Drop stale avByChannel so waitAvStarted
+    // does not resolve with an orphaned recent Active id from a prior join.
+    const chKey = ch.toLowerCase();
+    irc.avByChannel.delete(chKey);
     log(`av start on ${ch} as ${irc.nick}~${instance} via ${bridge}`);
     const wait = irc.waitAvStarted(ch, 10_000);
     irc.avStart(ch, instance, title);
