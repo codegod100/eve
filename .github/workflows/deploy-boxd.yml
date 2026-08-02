@@ -1,0 +1,113 @@
+name: Deploy to eve.boxd.sh
+
+# Merge (push to main) → sync /home/boxd/my-agent on the eve VM and restart
+# systemd units.
+#
+# Secrets:
+#   OPENBAO_TOKEN — reads BOXD_API_KEY from openbao.boxd.sh (secret/data/ai-api-keys)
+# Mint / refresh the boxd key and store it in OpenBao:
+#   KEY=$(boxd auth keys create "gh-actions deploy codegod100/eve")
+#   # write KEY into OpenBao path secret/data/ai-api-keys as BOXD_API_KEY
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Git SHA to deploy (default: the commit that triggered the run)"
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-eve-boxd
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch BOXD_API_KEY from OpenBao
+        id: openbao
+        env:
+          OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR || 'https://openbao.boxd.sh' }}
+          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENBAO_TOKEN}" ]; then
+            echo "::error::Missing repo secret OPENBAO_TOKEN (needed to read BOXD_API_KEY from OpenBao)."
+            exit 1
+          fi
+          URL="${OPENBAO_ADDR%/}/v1/secret/data/ai-api-keys"
+          RESP=$(curl -fsS -H "X-Vault-Token: ${OPENBAO_TOKEN}" "$URL") || {
+            echo "::error::Failed to read ${URL}"
+            exit 1
+          }
+          KEY=$(jq -r '.data.data.BOXD_API_KEY // empty' <<<"$RESP")
+          if [ -z "$KEY" ]; then
+            echo "::error::OpenBao ai-api-keys has no BOXD_API_KEY."
+            echo "Mint one and store it in secret/data/ai-api-keys:"
+            echo "  KEY=\$(boxd auth keys create 'gh-actions deploy codegod100/eve')"
+            exit 1
+          fi
+          echo "::add-mask::${KEY}"
+          # bxd_… API keys must be exchanged for a short-lived JWT; the CLI's
+          # BOXD_TOKEN expects that session token, not the raw API key.
+          EXCHANGE=$(curl -fsS -X POST \
+            -H "content-type: application/json" \
+            -d "{\"api_key\":$(jq -n --arg k "$KEY" '$k')}" \
+            https://app.boxd.sh/api/v1/auth/token) || {
+            echo "::error::Failed to exchange BOXD_API_KEY for a session token."
+            exit 1
+          }
+          TOKEN=$(jq -r '.token // empty' <<<"$EXCHANGE")
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Auth exchange returned no token (is BOXD_API_KEY valid?)."
+            exit 1
+          fi
+          echo "::add-mask::${TOKEN}"
+          echo "BOXD_TOKEN=${TOKEN}" >>"$GITHUB_ENV"
+          echo "Fetched BOXD_API_KEY from OpenBao and exchanged it for a session token."
+
+      - name: Install boxd CLI
+        run: curl -fsSL https://boxd.sh/downloads/cli/install.sh | sh
+
+      - name: Wake eve (if hibernated / paused / stopped)
+        run: |
+          export PATH="${HOME}/.local/bin:${PATH}"
+          # Best-effort: only one of these applies depending on machine state.
+          boxd machine wake eve --json >/dev/null 2>&1 || true
+          boxd machine resume eve --json >/dev/null 2>&1 || true
+          boxd machine start eve --json >/dev/null 2>&1 || true
+          boxd machine get eve --json
+
+      - name: Deploy to eve.boxd.sh
+        env:
+          DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+          DEPLOY_REPO: https://github.com/${{ github.repository }}.git
+        run: |
+          export PATH="${HOME}/.local/bin:${PATH}"
+          echo "Deploying ${DEPLOY_SHA} → eve (/home/boxd/my-agent)"
+          # Pass SHA/repo via -e so the remote shell does not depend on local quoting.
+          # The VM checkout may predate git (no .git) — bootstrap a remote if needed.
+          boxd machine exec eve \
+            --timeout 900 \
+            -e "DEPLOY_SHA=${DEPLOY_SHA}" \
+            -e "DEPLOY_REPO=${DEPLOY_REPO}" \
+            -- bash -lc '
+              set -euo pipefail
+              cd /home/boxd/my-agent
+              if [ ! -d .git ]; then
+                echo "[deploy] bootstrapping git in $(pwd)"
+                git init -b main
+                git remote add origin "$DEPLOY_REPO"
+              fi
+              git remote set-url origin "$DEPLOY_REPO"
+              git fetch --prune origin
+              git reset --hard "$DEPLOY_SHA"
+              # Keep local runtime artifacts; wipe other untracked cruft.
+              git clean -fd -e node_modules -e .eve -e .output -e logs
+              bash scripts/deploy-boxd.sh
+            '
