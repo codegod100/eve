@@ -57,6 +57,11 @@ if systemctl --user cat eve.target >/dev/null 2>&1; then
   bash "$ROOT/scripts/install-systemd.sh" --no-enable
 fi
 
+# Install WHEP demux Python before restart so irc-bridge's ready-gate passes
+# even if eve-prep later warns. Nix preferred; pip --target on bare boxd.
+echo "[deploy] ensuring WHEP Python deps ..."
+bash "$ROOT/scripts/install-whep-deps.sh"
+
 echo "[deploy] restarting stack ..."
 bash "$ROOT/scripts/start.sh"
 

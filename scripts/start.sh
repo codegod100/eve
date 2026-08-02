@@ -38,11 +38,15 @@ fi
 
 if [ "$LEGACY" -eq 0 ] && units_installed; then
   echo "[start] systemd: starting eve.target"
-  # Refresh secrets/build before (re)starting long-running units.
-  systemctl --user start eve-prep.service
+  # RemainAfterExit oneshot stays "active" after success — `start` is a no-op
+  # and would skip reinstalling WHEP deps / refreshing runtime.env on deploy.
+  systemctl --user restart eve-prep.service
   systemctl --user restart eve.service eve-irc-bridge.service
   if systemctl --user is-enabled eve-av-bridge.service >/dev/null 2>&1; then
     systemctl --user restart eve-av-bridge.service || true
+  fi
+  if systemctl --user is-enabled eve-av-bridge-streamplace.service >/dev/null 2>&1; then
+    systemctl --user restart eve-av-bridge-streamplace.service || true
   fi
   systemctl --user start eve.target
   systemctl --user --no-pager --full status eve.service eve-irc-bridge.service || true

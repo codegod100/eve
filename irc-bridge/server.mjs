@@ -212,6 +212,28 @@ function streamplaceWhepUrl(streamerId) {
  * Fail loud before /v1/watch/play if WHEP demux deps/script are missing.
  * Root-cause gate — never paper over with HLS.
  */
+function resolveWhepPython() {
+  const home = process.env.HOME ?? os.homedir();
+  const candidates = [
+    process.env.WHEP_PYTHON,
+    path.join(home, ".local/share/eve/whep-python/bin/python3"),
+    "python3",
+  ].filter(Boolean);
+  const seen = new Set();
+  for (const cand of candidates) {
+    if (seen.has(cand)) continue;
+    seen.add(cand);
+    if (cand !== "python3" && !fs.existsSync(cand)) continue;
+    const py = child_process.spawnSync(
+      cand,
+      ["-c", "import aiortc,aiohttp,av,numpy; print('ok')"],
+      { encoding: "utf8", timeout: 15_000 },
+    );
+    if (py.status === 0) return cand;
+  }
+  return null;
+}
+
 function assertWhepDemuxReady() {
   const demux =
     process.env.WHEP_DEMUX_PATH ||
@@ -224,22 +246,14 @@ function assertWhepDemuxReady() {
       `WHEP demux missing: ${demux}. Deploy scripts/whep-watch-demux.py and set WHEP_DEMUX_PATH.`,
     );
   }
-  const py = child_process.spawnSync(
-    process.env.WHEP_PYTHON || "python3",
-    [
-      "-c",
-      "import aiortc,aiohttp,av,numpy; print('ok')",
-    ],
-    { encoding: "utf8", timeout: 15_000 },
-  );
-  if (py.status !== 0) {
-    const detail = (py.stderr || py.stdout || "").trim().slice(0, 300);
+  const pyPath = resolveWhepPython();
+  if (!pyPath) {
     throw new Error(
       `WHEP Python deps missing (aiortc/aiohttp/av/numpy). ` +
-        `Run: bash scripts/install-whep-deps.sh  (nix build .#whep-python)` +
-        (detail ? ` (${detail})` : ""),
+        `Run: bash scripts/install-whep-deps.sh  (nix build .#whep-python, or pip --target fallback)`,
     );
   }
+  process.env.WHEP_PYTHON = pyPath;
   return demux;
 }
 

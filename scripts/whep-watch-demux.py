@@ -36,7 +36,7 @@ except ImportError as e:
     sys.stderr.write(
         "WHEP_DEPS_MISSING: %s\n"
         "Install with: bash scripts/install-whep-deps.sh "
-        "(nix build .#whep-python)\n" % e
+        "(nix build .#whep-python, or pip --target fallback)\n" % e
     )
     raise SystemExit(2) from e
 
