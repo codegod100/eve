@@ -1,0 +1,73 @@
+name: Deploy to eve.boxd.sh
+
+# Merge (push to main) → sync /home/boxd/my-agent on the eve VM and restart
+# systemd units. Requires repo secret BOXD_API_KEY (boxd auth key, bxd_…).
+#
+#   boxd auth keys create "gh-actions deploy codegod100/eve"
+#   gh secret set BOXD_API_KEY --repo codegod100/eve --body "$KEY"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Git SHA to deploy (default: the commit that triggered the run)"
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-eve-boxd
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require BOXD_API_KEY
+        env:
+          BOXD_API_KEY: ${{ secrets.BOXD_API_KEY }}
+        run: |
+          if [ -z "${BOXD_API_KEY}" ]; then
+            echo "::error::Missing repo secret BOXD_API_KEY."
+            echo "Mint one and store it:"
+            echo "  KEY=\$(boxd auth keys create 'gh-actions deploy codegod100/eve')"
+            echo "  gh secret set BOXD_API_KEY --repo codegod100/eve --body \"\$KEY\""
+            exit 1
+          fi
+
+      - name: Install boxd CLI
+        run: curl -fsSL https://boxd.sh/downloads/cli/install.sh | sh
+
+      - name: Wake eve (if hibernated / paused / stopped)
+        env:
+          BOXD_TOKEN: ${{ secrets.BOXD_API_KEY }}
+        run: |
+          export PATH="${HOME}/.local/bin:${PATH}"
+          # Best-effort: only one of these applies depending on machine state.
+          boxd machine wake eve --json >/dev/null 2>&1 || true
+          boxd machine resume eve --json >/dev/null 2>&1 || true
+          boxd machine start eve --json >/dev/null 2>&1 || true
+          boxd machine get eve --json
+
+      - name: Deploy to eve.boxd.sh
+        env:
+          BOXD_TOKEN: ${{ secrets.BOXD_API_KEY }}
+          DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          export PATH="${HOME}/.local/bin:${PATH}"
+          echo "Deploying ${DEPLOY_SHA} → eve (/home/boxd/my-agent)"
+          # Pass SHA via -e so the remote shell does not depend on local quoting.
+          boxd machine exec eve \
+            --timeout 900 \
+            -e "DEPLOY_SHA=${DEPLOY_SHA}" \
+            -- bash -lc '
+              set -euo pipefail
+              cd /home/boxd/my-agent
+              git fetch --prune origin
+              git reset --hard "$DEPLOY_SHA"
+              git clean -fd
+              bash scripts/deploy-boxd.sh
+            '

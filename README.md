@@ -181,6 +181,21 @@ loginctl enable-linger "$USER"    # once, if units should survive logout
 npm run boxd:start                # systemctl --user start eve.target
 ```
 
+### CI deploy (merge → eve.boxd.sh)
+
+Pushing (or merging) to `main` runs [`.github/workflows/deploy-boxd.yml`](.github/workflows/deploy-boxd.yml):
+it wakes the `eve` VM, `git reset --hard`s `/home/boxd/my-agent` to the merge SHA,
+then runs `scripts/deploy-boxd.sh` (`npm ci` + `scripts/start.sh`).
+
+One-time secret (raw key shown only once):
+
+```bash
+KEY=$(boxd auth keys create "gh-actions deploy codegod100/eve")
+gh secret set BOXD_API_KEY --repo codegod100/eve --body "$KEY"
+```
+
+Manual redeploy: Actions → **Deploy to eve.boxd.sh** → Run workflow.
+
 Legacy (no units): `bash scripts/start.sh --legacy` (prep + nohup bridge + foreground eve).
 
 Optional IRC env (defaults match freeq; set in `~/.config/eve/config.env` for units):
