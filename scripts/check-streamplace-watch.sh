@@ -49,11 +49,13 @@ fi
 # Video encode only runs when a MoQ subscriber requests the track.
 # Without a viewer, popped stays 0 by design — warn, don't hard-fail.
 if [[ -f "$LOG" ]]; then
-  recent=$(tail -c 200000 "$LOG" | python3 - <<'PY'
-import re,sys
-plain=re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read())
-vals=[int(m) for m in re.findall(r"popped=(\d+)", plain)]
-subs=sum(1 for line in plain.splitlines() if "started track: video/" in line)
+  recent=$(python3 - "$LOG" <<'PY'
+import re, sys
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()[-200_000:]
+plain = re.sub(r"\x1b\[[0-9;]*m", "", raw.decode("utf-8", "ignore"))
+vals = [int(m) for m in re.findall(r"popped=(\d+)", plain)]
+subs = sum(1 for line in plain.splitlines() if "started track: video/" in line)
 print(f"popped_max={max(vals) if vals else 0} video_track_starts={subs}")
 PY
 )
