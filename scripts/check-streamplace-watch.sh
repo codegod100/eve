@@ -14,12 +14,11 @@ LOG="${STREAMPLACE_AV_LOG:-$HOME/logs/streamplace-av.log}"
 echo "[check] control=$CONTROL plane=$PLANE"
 
 status_json=$(curl -fsS --max-time 8 "$CONTROL/streamplace/status")
-echo "$status_json" | head -c 400
-echo
+python3 -c 'import json,sys; j=json.loads(sys.argv[1]); print(json.dumps({"watch": j.get("status",{}).get("watch"), "session": j.get("status",{}).get("session")}, indent=2)[:500])' "$status_json"
 
-playing=$(echo "$status_json" | python3 -c 'import json,sys; j=json.load(sys.stdin); print("1" if j.get("status",{}).get("watch",{}).get("playing") else "0")')
-session=$(echo "$status_json" | python3 -c 'import json,sys; j=json.load(sys.stdin); s=j.get("status",{}).get("session") or {}; print(s.get("session_id") or "")')
-path=$(echo "$status_json" | python3 -c 'import json,sys; j=json.load(sys.stdin); s=j.get("status",{}).get("session") or {}; print(s.get("broadcast_path") or "")')
+playing=$(python3 -c 'import json,sys; j=json.loads(sys.argv[1]); print("1" if j.get("status",{}).get("watch",{}).get("playing") else "0")' "$status_json")
+session=$(python3 -c 'import json,sys; j=json.loads(sys.argv[1]); s=j.get("status",{}).get("session") or {}; print(s.get("session_id") or "")' "$status_json")
+path=$(python3 -c 'import json,sys; j=json.loads(sys.argv[1]); s=j.get("status",{}).get("session") or {}; print(s.get("broadcast_path") or "")' "$status_json")
 
 if [[ "$playing" != "1" ]]; then
   echo "[check] FAIL: watch not playing" >&2
