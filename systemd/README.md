@@ -151,6 +151,12 @@ fallback; if watch is broken, fix demux/deps (`scripts/install-whep-deps.sh` —
 nix or pip `--target`) or the freeq `WHEP_READY` gate
 (see `patches/freeq-whep-ready-gate.patch`).
 
+Health: `bash scripts/check-streamplace-watch.sh`. Eve must sit on the channel's
+**official** freeq `active` session (not an orphaned DB `recent` Active). When
+`active` is null, irc-bridge starts a fresh room so clients can Join existing.
+MoQ video encode parks until a freeq viewer subscribes (`popped=0` with no
+viewer is expected).
+
 ### stream.place publish plane (inverse / call rebroadcast)
 
 Egress only: freeq radio / a media URL → **RTMP** into stream.place (not a freeq
