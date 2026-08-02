@@ -86,18 +86,28 @@ jobs:
       - name: Deploy to eve.boxd.sh
         env:
           DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+          DEPLOY_REPO: https://github.com/${{ github.repository }}.git
         run: |
           export PATH="${HOME}/.local/bin:${PATH}"
           echo "Deploying ${DEPLOY_SHA} → eve (/home/boxd/my-agent)"
-          # Pass SHA via -e so the remote shell does not depend on local quoting.
+          # Pass SHA/repo via -e so the remote shell does not depend on local quoting.
+          # The VM checkout may predate git (no .git) — bootstrap a remote if needed.
           boxd machine exec eve \
             --timeout 900 \
             -e "DEPLOY_SHA=${DEPLOY_SHA}" \
+            -e "DEPLOY_REPO=${DEPLOY_REPO}" \
             -- bash -lc '
               set -euo pipefail
               cd /home/boxd/my-agent
+              if [ ! -d .git ]; then
+                echo "[deploy] bootstrapping git in $(pwd)"
+                git init -b main
+                git remote add origin "$DEPLOY_REPO"
+              fi
+              git remote set-url origin "$DEPLOY_REPO"
               git fetch --prune origin
               git reset --hard "$DEPLOY_SHA"
-              git clean -fd
+              # Keep local runtime artifacts; wipe other untracked cruft.
+              git clean -fd -e node_modules -e .eve -e .output -e logs
               bash scripts/deploy-boxd.sh
             '
