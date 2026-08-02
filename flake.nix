@@ -31,6 +31,9 @@
           inherit pkgs;
           demuxScript = ./scripts/whep-watch-demux.py;
         };
+
+      # Generic boxd host module (no eve/WHEP). Reusable from codegod100/nixos.
+      boxdModule = import ./nix/boxd/module.nix { };
     in
     (flake-utils.lib.eachSystem supportedSystems (
       system:
@@ -42,6 +45,12 @@
             system-manager.packages.${system}.default
           else
             null;
+        # boxd-machine is a Linux host profile; skip on Darwin.
+        boxdMachine =
+          if pkgs.stdenv.isLinux then
+            pkgs.callPackage ./nix/boxd/package.nix { }
+          else
+            null;
       in
       {
         packages =
@@ -50,6 +59,9 @@
             whep-python = whep.whepPython;
             whep-python-bin = whep.whepPythonBin;
             whep-demux = whep.whepDemux;
+          }
+          // nixpkgs.lib.optionalAttrs (boxdMachine != null) {
+            boxd-machine = boxdMachine;
           }
           // nixpkgs.lib.optionalAttrs (systemManagerPkg != null) {
             system-manager = systemManagerPkg;
@@ -89,6 +101,7 @@
             echo "  npm run typecheck"
             echo "  npm run boxd:start  # OpenBao key bridge + eve on :8000"
             echo "  nix build .#whep-python   # GC-rooted via install-whep-deps.sh"
+            echo "  nix build .#boxd-machine  # generic boxd host tools"
             echo "  bash scripts/system-manager-switch.sh  # boxd host packages"
           '';
         };
@@ -97,10 +110,21 @@
       }
     ))
     // {
-      # Host config for eve.boxd.sh — see nix/system-manager/README.md
+      # Generic module for any boxd VM — consume from github:codegod100/nixos.
+      # See nix/boxd/README.md.
+      systemManagerModules.boxd = boxdModule;
+      nixosModules.boxd = boxdModule;
+      nixosModules.default = boxdModule;
+
+      # Host config for eve.boxd.sh — generic boxd + WHEP (nix/system-manager/).
       systemConfigs.default = system-manager.lib.makeSystemConfig {
         modules = [ ./nix/system-manager/boxd.nix ];
       };
       systemConfigs.boxd = self.systemConfigs.default;
+
+      # Generic-only system-manager config (no eve WHEP) for other boxd machines.
+      systemConfigs.boxd-machine = system-manager.lib.makeSystemConfig {
+        modules = [ boxdModule ];
+      };
     };
 }
