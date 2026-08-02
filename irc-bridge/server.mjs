@@ -1915,7 +1915,7 @@ async function discoverActiveSession(channel) {
   const encoded = encodeURIComponent(channel);
   const url = `${FREEQ_API_BASE}/api/v1/channels/${encoded}/sessions`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
     if (!res.ok) return null;
     const json = await res.json();
     const channelActiveId =
@@ -1925,13 +1925,30 @@ async function discoverActiveSession(channel) {
           : null
         : null;
 
+    // freeq clients' "Join existing" only looks at `active`. After server
+    // thrash / ended-child sessions, `active` can be null while DB `recent`
+    // still lists state:"Active" orphans. Joining those orphans leaves eve
+    // publishing into a room nobody can discover → MoQ video never gets a
+    // subscriber (vshr parked, popped=0, black tile). Prefer av-start.
+    if (!channelActiveId) {
+      const orphanActive = (
+        Array.isArray(json?.recent) ? json.recent : []
+      ).filter((r) => isFreeqSessionActive(r?.state));
+      if (orphanActive.length) {
+        log(
+          `discover session: no official active on ${channel} but ${orphanActive.length} orphaned Active in recent — start fresh so clients can Join existing`,
+        );
+      }
+      return null;
+    }
+
     /** @type {string[]} */
     const ids = [];
     const pushId = (id) => {
       if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
     };
     // Prefer scanning the official active first.
-    if (channelActiveId) pushId(channelActiveId);
+    pushId(channelActiveId);
     for (const r of Array.isArray(json?.recent) ? json.recent : []) {
       if (isFreeqSessionActive(r?.state)) pushId(r?.id);
     }
@@ -1962,7 +1979,7 @@ async function discoverActiveSession(channel) {
       }
     }
     if (!scored.length) {
-      return channelActiveId || ids[0];
+      return channelActiveId;
     }
     scored.sort((a, b) => b.score - a.score);
     const best = scored[0];
