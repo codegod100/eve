@@ -21,7 +21,8 @@ agent/
 irc-bridge/
   server.mjs         # freeq IRC → POST /irc/inbound ; SSE /irc/out → PRIVMSG
 systemd/user/        # user unit templates (eve, irc-bridge, optional av-bridge + streamplace plane (:8792))
-nix/system-manager/  # boxd host packages via numtide system-manager (whep-python, …)
+nix/boxd/            # generic boxd host package/module (for codegod100/nixos)
+nix/system-manager/  # eve.boxd.sh host packages via system-manager (generic + WHEP)
 scripts/
   prep.sh, start.sh, install-systemd.sh, system-manager-switch.sh, fetch-keys.sh, sync-freeq-session.mjs
 flake.nix

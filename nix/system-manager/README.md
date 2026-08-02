@@ -42,3 +42,11 @@ bash scripts/system-manager-switch.sh
 | `jq`, `curl`, `git` | deploy/ops helpers |
 
 Config: [`boxd.nix`](./boxd.nix) · flake output: `systemConfigs.default` (alias `systemConfigs.boxd`).
+
+## Generic package (no WHEP)
+
+Baseline tools (`jq` / `curl` / `git`) live in [`nix/boxd/`](../boxd/) as
+`packages.boxd-machine`, `systemManagerModules.boxd`, `nixosModules.boxd`, and
+`systemConfigs.boxd-machine`. Eve’s module imports that baseline and adds WHEP.
+See [`nix/boxd/README.md`](../boxd/README.md) for consumption from
+[codegod100/nixos](https://github.com/codegod100/nixos).
