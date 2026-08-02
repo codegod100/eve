@@ -28,6 +28,10 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Fresh CLI defaults to http://boxd.sh:9443, which GitHub-hosted runners
+      # cannot reach. Force the public HTTPS API.
+      BOXD_API_URL: https://boxd.sh
     steps:
       - name: Fetch BOXD_API_KEY from OpenBao
         id: openbao
