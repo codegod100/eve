@@ -18,7 +18,7 @@ stream.place → freeq ingest is **WHEP (WebRTC)** only.
 - If WHEP is broken or flaky, **fix the root cause** in the WHEP path:
   - `scripts/whep-watch-demux.py` (aiortc demux)
   - `eve-av-bridge` watch plane (`/v1/watch/play` with a WHEP URL)
-  - Python deps (`scripts/requirements-whep.txt`)
+  - Python deps (`nix build .#whep-python` / `scripts/install-whep-deps.sh`)
   - rendition / DID / SDP negotiate errors from `place.stream.playback.whep`
 - Prefer failing loudly with a clear error over silent empty media.
 - `STREAMPLACE_WATCH_TRANSPORT` must remain `whep` (or unset → whep). Do not introduce an HLS default.

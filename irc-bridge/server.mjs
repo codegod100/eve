@@ -236,7 +236,7 @@ function assertWhepDemuxReady() {
     const detail = (py.stderr || py.stdout || "").trim().slice(0, 300);
     throw new Error(
       `WHEP Python deps missing (aiortc/aiohttp/av/numpy). ` +
-        `Run: bash scripts/install-whep-deps.sh` +
+        `Run: bash scripts/install-whep-deps.sh  (nix build .#whep-python)` +
         (detail ? ` (${detail})` : ""),
     );
   }

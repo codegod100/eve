@@ -56,7 +56,8 @@ node irc-bridge/server.mjs
 | `STREAMPLACE_AUTO` | `1` = restore last saved `watch` on boot (no pref → idle) |
 | `STREAMPLACE_WATCH_TRANSPORT` | always `whep` (HLS fallback is forbidden) |
 | `STREAMPLACE_WHEP_RENDITION` | WHEP rendition query (default `source`) |
-| `WHEP_DEMUX_PATH` | `scripts/whep-watch-demux.py` (set by prep/systemd) |
+| `WHEP_DEMUX_PATH` | flake wrapper `~/.local/share/eve/whep-watch-demux` (prep) |
+| `WHEP_PYTHON` | flake `~/.local/share/eve/whep-python/bin/python3` (prep) |
 | `STREAMPLACE_RTMP_URL` | publish ingest base (default `rtmps://stream.place:1935/live`) |
 | `STREAMPLACE_STREAM_KEY` | required for **publish** (from stream.place dashboard) |
 | `STREAMPLACE_PUBLISH_HANDLE` | optional public handle for go-live notices |

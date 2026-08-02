@@ -10,7 +10,7 @@ PartOf=eve.target
 Type=simple
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/share/eve/whep-python/bin:%h/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/.config/eve/runtime.env
 EnvironmentFile=-%h/.config/eve/config.env
 ExecStart=@NODE@ @ROOT@/irc-bridge/server.mjs
