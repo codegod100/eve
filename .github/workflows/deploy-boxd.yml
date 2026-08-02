@@ -52,10 +52,24 @@ jobs:
             echo "  KEY=\$(boxd auth keys create 'gh-actions deploy codegod100/eve')"
             exit 1
           fi
-          # Mask + export for later steps (BOXD_TOKEN is what the CLI reads).
           echo "::add-mask::${KEY}"
-          echo "BOXD_TOKEN=${KEY}" >>"$GITHUB_ENV"
-          echo "Fetched BOXD_API_KEY from OpenBao (len=${#KEY})."
+          # bxd_… API keys must be exchanged for a short-lived JWT; the CLI's
+          # BOXD_TOKEN expects that session token, not the raw API key.
+          EXCHANGE=$(curl -fsS -X POST \
+            -H "content-type: application/json" \
+            -d "{\"api_key\":$(jq -n --arg k "$KEY" '$k')}" \
+            https://app.boxd.sh/api/v1/auth/token) || {
+            echo "::error::Failed to exchange BOXD_API_KEY for a session token."
+            exit 1
+          }
+          TOKEN=$(jq -r '.token // empty' <<<"$EXCHANGE")
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Auth exchange returned no token (is BOXD_API_KEY valid?)."
+            exit 1
+          fi
+          echo "::add-mask::${TOKEN}"
+          echo "BOXD_TOKEN=${TOKEN}" >>"$GITHUB_ENV"
+          echo "Fetched BOXD_API_KEY from OpenBao and exchanged it for a session token."
 
       - name: Install boxd CLI
         run: curl -fsSL https://boxd.sh/downloads/cli/install.sh | sh

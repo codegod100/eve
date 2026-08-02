@@ -191,7 +191,7 @@ it reads `BOXD_API_KEY` from OpenBao (`secret/data/ai-api-keys`), wakes the `eve
 | Where | What |
 |-------|------|
 | GitHub secret `OPENBAO_TOKEN` | Lets Actions read OpenBao |
-| OpenBao `ai-api-keys` → `BOXD_API_KEY` | `bxd_…` key for `boxd machine exec eve` |
+| OpenBao `ai-api-keys` → `BOXD_API_KEY` | raw `bxd_…` API key (CI exchanges it for a session token) |
 
 Refresh the boxd key (raw value shown only once) and write it into OpenBao:
 
