@@ -160,12 +160,12 @@ Skill: `load_skill` → `freeq-irc`. Target nick: `eve` / handle `eve.boxd.sh` (
 ## Local dev
 
 ```bash
-nix develop          # or: direnv allow (includes WHEP python: aiortc/av)
+nix develop          # or: direnv allow (includes WHEP python: aiortc/av; optional)
 npm install
 export OPENCODE_API_KEY=…   # or other provider keys
 npm run dev
 # stream.place watch deps (also run by prep on boxd):
-bash scripts/install-whep-deps.sh   # nix build .#whep-python
+bash scripts/install-whep-deps.sh   # nix preferred; pip --target on bare boxd
 ```
 
 ## Boxd (eve.boxd.sh)

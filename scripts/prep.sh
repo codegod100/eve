@@ -156,18 +156,18 @@ else
 fi
 
 # --- stream.place WHEP demux (watch is WHEP-only; never HLS) -----------------
-# Python deps come from flake package whep-python (not pip).
+# Python deps: nix flake whep-python preferred; pip --target fallback on boxd.
 WHEP_SHARE="${HOME}/.local/share/eve"
 WHEP_WRAPPER="${WHEP_SHARE}/whep-watch-demux"
 WHEP_PY="${WHEP_SHARE}/whep-python/bin/python3"
 set_default WHEP_DEMUX_PATH "${WHEP_WRAPPER}"
 set_default STREAMPLACE_WATCH_TRANSPORT "whep"
 if [ -f "$ROOT/scripts/install-whep-deps.sh" ]; then
-  echo "[prep] building flake WHEP Python env (nix build .#whep-python) ..."
+  echo "[prep] installing WHEP Python env (nix or pip --target) ..."
   if bash "$ROOT/scripts/install-whep-deps.sh"; then
     :
   else
-    echo "[prep] warning: WHEP flake build failed — stream.place watch will error until fixed" >&2
+    echo "[prep] warning: WHEP deps install failed — stream.place watch will error until fixed" >&2
   fi
 fi
 if [ -x "$WHEP_PY" ]; then

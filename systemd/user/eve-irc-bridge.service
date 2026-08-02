@@ -11,6 +11,10 @@ Type=simple
 WorkingDirectory=@ROOT@
 Environment=HOME=%h
 Environment=PATH=%h/.local/share/eve/whep-python/bin:%h/.local/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
+# Defaults when runtime.env lacks them (prep failed / first boot).
+Environment=WHEP_PYTHON=%h/.local/share/eve/whep-python/bin/python3
+Environment=WHEP_DEMUX_PATH=%h/.local/share/eve/whep-watch-demux
+Environment=STREAMPLACE_WATCH_TRANSPORT=whep
 EnvironmentFile=-%h/.config/eve/runtime.env
 EnvironmentFile=-%h/.config/eve/config.env
 ExecStart=@NODE@ @ROOT@/irc-bridge/server.mjs
