@@ -45,7 +45,23 @@ function sseBag(): SseBag {
   return g[GLOBAL_SSE_KEY];
 }
 
-function broadcastPrivmsg(target: string, text: string) {
+/**
+ * Number of irc-bridge processes currently listening on the outbound SSE
+ * stream (GET /irc/out). Used by the irc_send_message tool to tell the model
+ * whether a proactive send has anywhere to go before claiming success.
+ */
+export function ircBridgeClientCount(): number {
+  return sseBag().clients.size;
+}
+
+/**
+ * Proactively push a PRIVMSG to the irc-bridge over the outbound SSE stream,
+ * independent of any turn's reply. Exported for the irc_send_message tool —
+ * this is the only way eve can speak to a channel it wasn't just mentioned
+ * in (see agent/channels/irc.ts module doc: the bridge owns the socket,
+ * eve only streams outbound lines to it).
+ */
+export function broadcastPrivmsg(target: string, text: string) {
   const payload: Outbound = { type: "privmsg", target, text };
   const data = `event: privmsg\ndata: ${JSON.stringify(payload)}\n\n`;
   const bag = sseBag();
@@ -89,7 +105,7 @@ function sanitizeIrcContext(raw: unknown): string[] | undefined {
   return [framed[0]!];
 }
 
-const IRC_CHANNEL = process.env.IRC_CHANNEL ?? "#test";
+export const IRC_CHANNEL = process.env.IRC_CHANNEL ?? "#test";
 
 export type IrcReceiveTarget = {
   channel?: string;
