@@ -30,7 +30,16 @@ export default defineChannel({
           let buffer = ""; let answer = "";
           while (true) {
             const next = await reader.read(); if (next.done) break;
-            buffer += decoder.decode(next.value, { stream: true });
+            const chunk: any = next.value;
+            if (chunk && typeof chunk === "object" && !(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) {
+              const event: any = chunk; const data = event.data ?? {};
+              if (event.type === "message.appended") answer = data.messageDelta ?? data.text ?? answer;
+              if (event.type === "message.completed" && event.data?.finishReason !== "tool-calls") answer = data.message ?? answer;
+              if (event.type === "session.waiting" || event.type === "turn.completed") { task.status = { state: "completed" }; if (answer) task.artifacts = [{ artifactId: `${task.id}-artifact`, parts: [{ kind: "text", text: answer }] }]; }
+              if (event.type === "turn.failed" || event.type === "session.failed") task.status = { state: "failed", message: { role: "ROLE_AGENT", parts: [{ kind: "text", text: String(data.message ?? "turn failed") }] } };
+              continue;
+            }
+            buffer += decoder.decode(chunk, { stream: true });
             const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
             for (const line of lines) {
               if (!line.trim()) continue;
