@@ -12,6 +12,11 @@ const tasks = new Map<string, any>();
 // without this a follow-up message on the same A2A contextId would re-read
 // the prior turn's events first and return its stale answer again.
 const cursors = new Map<string, number>();
+// eve does not queue messages to a session — a send before the prior turn
+// parks may be folded into it or dropped (see execution-model-and-durability
+// #message-delivery-and-queueing). Gate each contextId's next send() on the
+// previous turn's stream reader actually finishing, so bursts don't race.
+const queues = new Map<string, Promise<void>>();
 
 const DID =
   process.env.ATPROTO_DID?.trim() ||
@@ -25,6 +30,12 @@ export default defineChannel({
       const message = body?.message;
       const text = (message?.parts ?? []).map((part: any) => part?.text ?? "").join("").trim();
       if (message?.role !== "user" && message?.role !== "ROLE_USER" || !text) return Response.json({ error: "user text required" }, { status: 400 });
+      const queueKey: string | undefined = message.contextId;
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const prior = queueKey ? (queues.get(queueKey) ?? Promise.resolve()) : Promise.resolve();
+      if (queueKey) queues.set(queueKey, gate);
+      await prior; // wait for this contextId's previous turn to park before sending the next one
       const session = await send(text, { auth: null, title: "A2A conversation", continuationToken: message.contextId });
       const task: any = { id: session.id, contextId: message.contextId ?? session.id, status: { state: "working" }, history: [message] };
       tasks.set(session.id, task);
@@ -76,6 +87,7 @@ export default defineChannel({
           cursors.set(session.id, startIndex + consumed);
         } catch (error) { task.status = { state: "failed", message: { role: "ROLE_AGENT", parts: [{ kind: "text", text: String(error) }] } }; }
       })();
+      run.finally(release); // let the next queued send() for this contextId proceed once this turn truly parks
       // Block for the reply since the A2A card declares streaming:false —
       // Orchestral expects message:send itself to carry the final text, not
       // a "working" placeholder to poll later. Bounded by a timeout so a
