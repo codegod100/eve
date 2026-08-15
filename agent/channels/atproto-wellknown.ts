@@ -12,7 +12,8 @@ const DID =
 
 export default defineChannel({
   routes: [
-    POST("/a2a", async (req, { send }) => {
+    GET("/agent-card", async () => Response.json({ name: "Eve", description: "Eve A2A agent", url: "https://eve.boxd.sh/message/send", version: "1.0.0", capabilities: { streaming: false, pushNotifications: false }, defaultInputModes: ["text"], defaultOutputModes: ["text"] })),
+    POST("/message/send", async (req, { send }) => {
       const body: any = await req.json();
       const message = body?.message;
       const text = (message?.parts ?? []).map((part: any) => part?.text ?? "").join("").trim();
