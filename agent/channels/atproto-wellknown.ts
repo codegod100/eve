@@ -7,6 +7,11 @@ import { defineChannel, GET, POST } from "eve/channels";
  * DID can be overridden with ATPROTO_DID (set by prep from rook identity).
  */
 const tasks = new Map<string, any>();
+// Absolute event count already consumed per session's durable stream.
+// getEventStream() with no startIndex replays from event 0 every time, so
+// without this a follow-up message on the same A2A contextId would re-read
+// the prior turn's events first and return its stale answer again.
+const cursors = new Map<string, number>();
 
 const DID =
   process.env.ATPROTO_DID?.trim() ||
@@ -43,25 +48,32 @@ export default defineChannel({
         }
         return false;
       };
+      const startIndex = cursors.get(session.id) ?? 0;
+      let consumed = 0;
       const run = (async () => {
         try {
-          const stream = await session.getEventStream();
+          const stream = await session.getEventStream({ startIndex });
           const reader = stream.getReader(); const decoder = new TextDecoder();
           let buffer = "";
           while (true) {
             const next = await reader.read(); if (next.done) break;
             const chunk: any = next.value;
             if (chunk && typeof chunk === "object" && !(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) {
-              if (applyEvent(chunk)) { reader.releaseLock(); return; }
+              consumed++;
+              if (applyEvent(chunk)) { reader.releaseLock(); cursors.set(session.id, startIndex + consumed); return; }
               continue;
             }
             buffer += decoder.decode(chunk, { stream: true });
             const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
             for (const line of lines) {
               if (!line.trim()) continue;
-              try { if (applyEvent(JSON.parse(line))) { reader.releaseLock(); return; } } catch { /* tolerate fragmented events */ }
+              try {
+                consumed++;
+                if (applyEvent(JSON.parse(line))) { reader.releaseLock(); cursors.set(session.id, startIndex + consumed); return; }
+              } catch { /* tolerate fragmented events */ }
             }
           }
+          cursors.set(session.id, startIndex + consumed);
         } catch (error) { task.status = { state: "failed", message: { role: "ROLE_AGENT", parts: [{ kind: "text", text: String(error) }] } }; }
       })();
       // Block for the reply since the A2A card declares streaming:false —
