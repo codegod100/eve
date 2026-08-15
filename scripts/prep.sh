@@ -63,7 +63,8 @@ if [ -n "${OPENBAO_ADDR:-}" ] && [ -n "${OPENBAO_TOKEN:-}" ]; then
 else
   echo "[prep] OPENBAO_ADDR/TOKEN unset — skipping key fetch (using process env if any)"
   for k in FUGU_API_KEY META_API_KEY OLLAMA_API_KEY OPENCODE_API_KEY \
-    OPENROUTER_API_KEY UMANS_API_KEY ANNA_API_KEY LINEAR_API_KEY; do
+    OPENROUTER_API_KEY UMANS_API_KEY ANNA_API_KEY LINEAR_API_KEY \
+    CLOUDFLARE_API_TOKEN; do
     if [ -n "${!k:-}" ]; then
       env_set "$k" "${!k}"
     fi
@@ -98,6 +99,8 @@ mkdir -p "${ANNA_DOWNLOAD_DIR}"
 echo "[prep] ANNA_DOWNLOAD_DIR=${ANNA_DOWNLOAD_DIR}"
 
 set_default OPENCODE_MODEL "deepseek-v4-flash-free"
+set_default CLOUDFLARE_ACCOUNT_ID "2612967e82750619224e7446c4c41b0b"
+set_default CLOUDFLARE_AI_MODEL "@cf/zai-org/glm-5.2"
 set_default IRC_HOST "irc.freeq.at"
 set_default IRC_PORT "6697"
 set_default IRC_TLS "1"
@@ -121,7 +124,7 @@ env_set PATH "${WHEP_PYTHON_BIN}:${HOME}/.local/bin:/nix/var/nix/profiles/defaul
 env_set HOME "${HOME}"
 env_set EVE_ROOT "${ROOT}"
 
-echo "[prep] model: ${OPENCODE_MODEL}"
+echo "[prep] model: ${CLOUDFLARE_AI_MODEL} (account ${CLOUDFLARE_ACCOUNT_ID})"
 echo "[prep] irc: ${IRC_NICK}@${IRC_HOST} → ${IRC_CHANNEL} via bridge → ${EVE_URL}"
 
 # --- freeq / rook session ---------------------------------------------------

@@ -117,7 +117,7 @@ if [ ! -f "$CONFIG_DIR/config.env" ]; then
 # Optional non-secret overrides for eve units (systemd EnvironmentFile).
 # IRC_NICK=eve
 # IRC_CHANNEL=#test
-# OPENCODE_MODEL=deepseek-v4-flash-free
+# CLOUDFLARE_AI_MODEL=@cf/zai-org/glm-5.2
 EOF
   echo "[install] wrote $CONFIG_DIR/config.env"
 fi

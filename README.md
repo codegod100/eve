@@ -173,7 +173,8 @@ Skill: `load_skill` → `freeq-irc`. Target nick: `eve` / handle `eve.boxd.sh` (
 ```bash
 nix develop          # or: direnv allow (includes WHEP python: aiortc/av; optional)
 npm install
-export OPENCODE_API_KEY=…   # or other provider keys
+export CLOUDFLARE_API_TOKEN=…   # or other provider keys
+export CLOUDFLARE_ACCOUNT_ID=…
 npm run dev
 # stream.place watch deps (also run by prep on boxd):
 bash scripts/install-whep-deps.sh   # system-manager → nix → pip --target

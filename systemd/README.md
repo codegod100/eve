@@ -104,7 +104,7 @@ systemctl --user start eve-freeq-session-refresh.service
 | File | Purpose |
 |------|---------|
 | `openbao.env` | `OPENBAO_ADDR`, `OPENBAO_TOKEN` (prep only; mode `0600`) |
-| `config.env` | optional non-secret overrides (`IRC_*`, `OPENCODE_MODEL`, …) |
+| `config.env` | optional non-secret overrides (`IRC_*`, `CLOUDFLARE_AI_MODEL`, …) |
 | `runtime.env` | **written by prep** — API keys + defaults for services |
 
 Templates live in `systemd/user/`; install substitutes `@ROOT@`, `@NODE@`, `@NPX@`.
