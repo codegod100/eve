@@ -40,20 +40,27 @@ export default defineChannel({
       const task: any = { id: session.id, contextId: message.contextId ?? session.id, status: { state: "working" }, history: [message] };
       tasks.set(session.id, task);
       let answer = "";
+      // A resumed read starts at the previous turn's cursor, which lands
+      // exactly on the trailing session.waiting that turn left unconsumed
+      // (see the terminal-event break below). Ignore terminal-looking events
+      // until we've actually seen *this* turn start, or that leftover event
+      // gets mistaken for our own turn completing with no answer yet.
+      let turnStarted = false;
       // Applies one event to `task`/`answer`. Returns true once a terminal
       // event lands, so the reader can stop — the event stream is durable
       // per-session and does NOT close when a turn finishes, so waiting on
       // stream end (reader done) instead of a terminal event hangs forever.
       const applyEvent = (event: any): boolean => {
         const data = event?.data ?? {};
+        if (event?.type === "turn.started") turnStarted = true;
         if (event?.type === "message.appended") answer = data.messageDelta ?? data.text ?? answer;
         if (event?.type === "message.completed" && data.finishReason !== "tool-calls") answer = data.message ?? answer;
-        if (event?.type === "session.waiting" || event?.type === "turn.completed") {
+        if (turnStarted && (event?.type === "session.waiting" || event?.type === "turn.completed")) {
           task.status = { state: "completed" };
           if (answer) task.artifacts = [{ artifactId: `${task.id}-artifact`, parts: [{ kind: "text", text: answer }] }];
           return true;
         }
-        if (event?.type === "turn.failed" || event?.type === "session.failed") {
+        if (turnStarted && (event?.type === "turn.failed" || event?.type === "session.failed")) {
           task.status = { state: "failed", message: { role: "ROLE_AGENT", parts: [{ kind: "text", text: String(data.message ?? "turn failed") }] } };
           return true;
         }
