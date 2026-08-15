@@ -10,6 +10,15 @@
 - **Schedules**: `vit-request-caps` every 10m → explore kind:request on controlled beacons → IRC `#test`
 - **Secrets**: API keys pulled live from OpenBao (`openbao.boxd.sh`) via `scripts/fetch-keys.sh` — never committed
 
+## A2A (Agent2Agent)
+
+Eve exposes an A2A JSON-RPC channel for orchestrators. The channel is available at
+`/eve/v1/a2a` (the agent card is at
+`/eve/v1/a2a/.well-known/agent-card.json`). It supports `message/send`,
+`tasks/get`, and `tasks/send`, with text messages and task history. Set
+`A2A_PUBLIC_URL` when the deployment is behind a proxy, and optionally set
+`A2A_AGENT_NAME` / `A2A_AGENT_DESCRIPTION` to customize the card.
+
 ## Layout
 
 ```
