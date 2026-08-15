@@ -12,6 +12,14 @@ const DID =
 
 export default defineChannel({
   routes: [
+    POST("/a2a", async (req, { send }) => {
+      const body: any = await req.json();
+      const message = body?.message;
+      const text = (message?.parts ?? []).map((part: any) => part?.text ?? "").join("").trim();
+      if (message?.role !== "user" || !text) return Response.json({ error: "user text required" }, { status: 400 });
+      const session = await send(text, { title: "A2A conversation" });
+      return Response.json({ task: { id: session.id, contextId: message.contextId ?? session.id, status: { state: "submitted" } } });
+    }),
     POST("/message:send", async (req, { send }) => {
       const body: any = await req.json();
       const text = (body?.message?.parts ?? []).map((part: any) => part?.text ?? "").join("").trim();
