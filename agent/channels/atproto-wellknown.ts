@@ -21,8 +21,30 @@ export default defineChannel({
       const text = (message?.parts ?? []).map((part: any) => part?.text ?? "").join("").trim();
       if (message?.role !== "user" && message?.role !== "ROLE_USER" || !text) return Response.json({ error: "user text required" }, { status: 400 });
       const session = await send(text, { title: "A2A conversation", continuationToken: message.contextId });
-      const task: any = { id: session.id, contextId: message.contextId ?? session.id, status: { state: "submitted" }, history: [message] };
+      const task: any = { id: session.id, contextId: message.contextId ?? session.id, status: { state: "working" }, history: [message] };
       tasks.set(session.id, task);
+      const stream = await session.getEventStream();
+      const reader = stream.getReader(); const decoder = new TextDecoder();
+      let buffer = ""; let answer = "";
+      try {
+        while (true) {
+          const next = await reader.read(); if (next.done) break;
+          buffer += decoder.decode(next.value, { stream: true });
+          const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const event: any = JSON.parse(line); const data = event.data ?? {};
+              if (event.type === "message.appended") answer = data.messageDelta ?? data.text ?? answer;
+              if (event.type === "message.completed" && event.data?.finishReason !== "tool-calls") answer = data.message ?? answer;
+              if (event.type === "turn.failed" || event.type === "session.failed") throw new Error(String(data.message ?? "Eve turn failed"));
+            } catch (e) { if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e; }
+          }
+          if (answer && buffer.length === 0) { /* continue until terminal stream event */ }
+        }
+      } finally { reader.releaseLock(); }
+      task.status = { state: "completed" };
+      if (answer) task.artifacts = [{ artifactId: `${task.id}-artifact`, parts: [{ kind: "text", text: answer }] }];
       return Response.json({ task });
     }),
     GET("/tasks/:id", async (_req, { params }) => { const task = tasks.get(params.id); return task ? Response.json({ task }) : Response.json({ error: "task not found" }, { status: 404 }); }),
