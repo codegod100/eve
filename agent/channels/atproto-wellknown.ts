@@ -21,7 +21,7 @@ export default defineChannel({
       const text = (message?.parts ?? []).map((part: any) => part?.text ?? "").join("").trim();
       if (message?.role !== "user" && message?.role !== "ROLE_USER" || !text) return Response.json({ error: "user text required" }, { status: 400 });
       const session = await send(text, { title: "A2A conversation", continuationToken: message.contextId });
-      const task: any = { id: session.id, contextId: message.contextId ?? session.id, status: { state: "working" }, history: [message] };
+      const task: any = { id: session.id, contextId: message.contextId ?? session.id, status: { state: "completed" }, history: [message], artifacts: [{ artifactId: `${session.id}-artifact`, parts: [{ kind: "text", text: "Eve received your message and is processing it." }] }] };
       tasks.set(session.id, task);
       return Response.json({ task });
     }),
