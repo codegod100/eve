@@ -12,6 +12,7 @@ const DID =
 
 export default defineChannel({
   routes: [
+    GET("/.well-known/agent-card.json", async () => Response.json({ name: "Eve", description: "Eve A2A agent", url: "https://eve.boxd.sh", version: "1.0.0", capabilities: { streaming: false, pushNotifications: false }, defaultInputModes: ["text"], defaultOutputModes: ["text"] })),
     GET("/.well-known/atproto-did", async () => {
       return new Response(`${DID}\n`, {
         status: 200,
